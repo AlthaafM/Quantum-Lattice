@@ -1,0 +1,28 @@
+# NEVER commit these — real secrets, real keys, real chain/user data.
+
+# SMTP credentials
+secrets.env
+
+# Vault keys (even encrypted, these stay private)
+master_vault_a_secret.key
+master_vault_a_public.key
+operational_vault_b_secret.key
+operational_vault_b_public.key
+
+# Miner's own reward key (per-operator, not project code)
+miner_wallet_secret.key
+miner_wallet_public.key
+
+# Admin tokens (regenerated per node, never shared)
+*_admin_token.txt
+
+# The actual chain database — real user registrations, real chain state
+ql_db_node1/
+ql_db_node2/
+
+# Standard Rust build output
+target/
+
+# Downloadable release packages (these are build artifacts, not source)
+ql-miner-linux-x64.tar.gz
+ql-miner-windows-x64.zip
