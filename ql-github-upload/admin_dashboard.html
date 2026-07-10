@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>QL Master Control</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #060913; color: #e2e8f0; margin: 0; padding: 20px; }
+        .container { max-width: 1300px; margin: 0 auto; }
+        header { text-align: center; padding: 20px 0; border-bottom: 2px solid #1e293b; margin-bottom: 30px; }
+        h1 { color: #f59e0b; margin: 0; text-transform: uppercase; letter-spacing: 2px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .card { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 24px; box-shadow: 0 4px 10px rgba(0,0,0,0.7); }
+        .card h3 { color: #f8fafc; margin-top: 0; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+        .metric { font-size: 1.8rem; font-weight: bold; color: #10b981; margin: 10px 0; }
+        .vault-metric { font-size: 1.5rem; font-weight: bold; color: #f59e0b; margin: 8px 0; }
+        .pool-metric { font-size: 1.8rem; font-weight: bold; color: #38bdf8; margin: 10px 0; }
+        .label { color: #64748b; font-size: 0.85rem; text-transform: uppercase; }
+        .status-badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; }
+        .online { background-color: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid #10b981; }
+        .offline { background-color: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid #ef4444; }
+        .warn-banner { background-color: rgba(240,180,41,0.1); border: 1px solid rgba(240,180,41,0.4); color: #f5d78a; border-radius: 8px; padding: 14px 18px; margin-bottom: 24px; font-size: 0.9rem; line-height: 1.5; }
+        .section-title { font-size: 1.3rem; color: #38bdf8; text-transform: uppercase; margin-bottom: 20px; font-weight: bold; border-left: 4px solid #38bdf8; padding-left: 10px; }
+        .action-btn { background-color: #0284c7; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; text-transform: uppercase; font-weight: bold; margin-top: 15px; }
+        table.users-table { width:100%; border-collapse: collapse; margin-top: 16px; }
+        table.users-table th { padding: 8px 6px; color:#64748b; font-size:0.8rem; text-transform:uppercase; text-align:left; border-bottom: 1px solid #334155; }
+        table.users-table td { padding: 10px 6px; border-bottom: 1px solid #1e293b; font-size: 0.85rem; word-break: break-all; }
+        .node-source { font-size: 0.7rem; color: #64748b; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header><h1>QL Master Control Panel</h1><div style="color: #64748b; margin-top: 5px; font-weight: bold;">Incorporated by FuturisticAI — Combined view of both nodes</div></header>
+
+        <div id="peer-warning" class="warn-banner" style="display:none;">
+            Node 2's admin token wasn't included in this page's URL, so its private data (vault balances, users registered there) can't be shown here.
+            Load this page as:<br>
+            <code>http://127.0.0.1:THIS_NODE_PORT/?token=THIS_NODE_TOKEN&amp;peer_token=OTHER_NODE_TOKEN</code>
+        </div>
+
+        <div class="section-title">Decentralized Node Cluster Monitoring</div>
+        <div class="grid">
+            <div class="card">
+                <h3>Node 1 <span class="node-source" id="n1-source"></span></h3>
+                <div id="n1-status" class="status-badge offline">CHECKING…</div>
+                <div class="metric" id="n1-height">Height: -</div>
+                <p class="label">Total Minted Supply: <span id="n1-supply">-</span> QL</p>
+                <div class="vault-metric" id="n1-vault-a">Vault A: - QL</div>
+                <div class="vault-metric" id="n1-vault-b">Vault B: - QL</div>
+            </div>
+            <div class="card">
+                <h3>Node 2 <span class="node-source" id="n2-source"></span></h3>
+                <div id="n2-status" class="status-badge offline">CHECKING…</div>
+                <div class="metric" id="n2-height">Height: -</div>
+                <p class="label">Total Minted Supply: <span id="n2-supply">-</span> QL</p>
+                <div class="vault-metric" id="n2-vault-a">Vault A: - QL</div>
+                <div class="vault-metric" id="n2-vault-b">Vault B: - QL</div>
+            </div>
+        </div>
+
+        <div class="section-title">Ecosystem Pool Tokenomics</div>
+        <div class="grid">
+            <div class="card" style="border-left: 4px solid #38bdf8;">
+                <h3>Public Mining Allocation Status</h3>
+                <div class="pool-metric" id="mining-pool-left">- QL</div><div class="label">Remaining Available for Mining Node Operators (as reported by this node)</div>
+            </div>
+        </div>
+
+        <div class="section-title">Private Vault Core</div>
+        <div class="grid">
+            <div class="card">
+                <h3>Vault Addresses</h3>
+                <p class="label" style="margin-bottom:10px;">Paste these into the "To" field for a vault-to-vault transfer.</p>
+                <div class="label">Master Vault A</div>
+                <div style="font-family:monospace; font-size:11px; word-break:break-all; background:#0a0b16; border:1px solid #334155; border-radius:6px; padding:8px; margin:4px 0 14px;" id="vault-a-address">Loading…</div>
+                <div class="label">Operational Vault B</div>
+                <div style="font-family:monospace; font-size:11px; word-break:break-all; background:#0a0b16; border:1px solid #334155; border-radius:6px; padding:8px; margin:4px 0;" id="vault-b-address">Loading…</div>
+            </div>
+            <div class="card">
+                <h3>Sign and Broadcast Transaction</h3>
+                <p class="label">Sends from whichever vault you select, signed using this node's own local vault key files. Works for vault-to-vault transfers or sending to any address (e.g. rewarding a miner directly).</p>
+
+                <label style="display:block; font-size:0.8rem; color:#64748b; text-transform:uppercase; margin:14px 0 6px;">From</label>
+                <select id="send-from-vault" style="width:100%; background:#0a0b16; border:1px solid #334155; border-radius:8px; padding:10px; color:#e2e8f0; font-family:inherit;">
+                    <option value="a">Master Vault A</option>
+                    <option value="b">Operational Vault B</option>
+                </select>
+
+                <label style="display:block; font-size:0.8rem; color:#64748b; text-transform:uppercase; margin:14px 0 6px;">To (hex address)</label>
+                <textarea id="send-to-address" rows="2" style="width:100%; background:#0a0b16; border:1px solid #334155; border-radius:8px; padding:10px; color:#e2e8f0; font-family:monospace; font-size:12px; resize:vertical;" placeholder="Paste the recipient's address — the other vault's address for a vault transfer, or any wallet/miner address to send directly"></textarea>
+
+                <label style="display:block; font-size:0.8rem; color:#64748b; text-transform:uppercase; margin:14px 0 6px;">Amount (QL)</label>
+                <input type="number" id="send-amount" min="0" step="0.00000001" placeholder="0.00" style="width:100%; background:#0a0b16; border:1px solid #334155; border-radius:8px; padding:10px; color:#e2e8f0; font-family:inherit;">
+
+                <div id="send-status" style="margin-top:12px; font-size:0.85rem; display:none; padding:10px; border-radius:8px;"></div>
+
+                <button class="action-btn" id="btn-send-tx">Sign and Broadcast Transaction</button>
+            </div>
+        </div>
+
+        <div class="section-title">Registered Users (combined)</div>
+        <div class="grid">
+            <div class="card" style="grid-column: 1 / -1;">
+                <h3>Email Directory <span class="label" id="users-count" style="margin-left:10px;"></span></h3>
+                <p class="label">Merged from both nodes' directories — purely who has linked an email to a wallet address. This system never sees or stores anyone's secret key. It cannot move funds.</p>
+                <table class="users-table">
+                    <thead>
+                        <tr>
+                            <th>Full Name</th>
+                            <th>Verified</th>
+                            <th>Email</th>
+                            <th>Address</th>
+                            <th>Registered</th>
+                            <th>Seen On</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-tbody">
+                        <tr><td colspan="6" style="color:#64748b;">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <script>
+        // ---- Figure out which node this page was loaded from, and where its
+        // fixed-pair peer lives. This project currently always runs exactly
+        // two nodes on fixed ports, so this mapping is deliberately simple —
+        // revisit if/when the network grows beyond two known nodes.
+        const params = new URLSearchParams(window.location.search);
+        const OWN_TOKEN = params.get('token') || '';
+        const PEER_TOKEN = params.get('peer_token') || '';
+        const OWN_PORT = parseInt(window.location.port, 10);
+
+        const PORT_PAIRS = { 18034: 19034, 19034: 18034 };
+        const PEER_PORT = PORT_PAIRS[OWN_PORT] || (OWN_PORT === 18034 ? 19034 : 18034);
+        const IS_NODE1 = OWN_PORT === 18034;
+
+        const SELF = { port: OWN_PORT, token: OWN_TOKEN, prefix: IS_NODE1 ? 'n1' : 'n2' };
+        const PEER = { port: PEER_PORT, token: PEER_TOKEN, prefix: IS_NODE1 ? 'n2' : 'n1' };
+
+        if (!PEER_TOKEN) {
+            document.getElementById('peer-warning').style.display = 'block';
+        }
+
+        document.getElementById(SELF.prefix + '-source').innerText = '(this page)';
+        document.getElementById(PEER.prefix + '-source').innerText = PEER_TOKEN ? '(via peer_token)' : '(token missing)';
+
+        async function fetchNodeAdmin(node) {
+            const prefix = node.prefix;
+            if (!node.token) {
+                document.getElementById(prefix + '-status').className = 'status-badge offline';
+                document.getElementById(prefix + '-status').innerText = 'NO TOKEN';
+                return null;
+            }
+            try {
+                const res = await fetch('http://127.0.0.1:' + node.port + '/api/admin/json?token=' + encodeURIComponent(node.token));
+                if (res.status === 401) {
+                    document.getElementById(prefix + '-status').className = 'status-badge offline';
+                    document.getElementById(prefix + '-status').innerText = 'BAD TOKEN';
+                    return null;
+                }
+                const data = await res.json();
+                document.getElementById(prefix + '-status').className = 'status-badge online';
+                document.getElementById(prefix + '-status').innerText = 'ONLINE';
+                document.getElementById(prefix + '-height').innerText = 'Height: ' + data.chain_height;
+                document.getElementById(prefix + '-supply').innerText = data.total_minted_supply.toLocaleString();
+                document.getElementById(prefix + '-vault-a').innerText = 'Vault A: ' + data.vault_a_balance.toLocaleString() + ' QL';
+                document.getElementById(prefix + '-vault-b').innerText = 'Vault B: ' + data.vault_b_balance.toLocaleString() + ' QL';
+                if (data.vault_a_address) document.getElementById('vault-a-address').textContent = data.vault_a_address;
+                if (data.vault_b_address) document.getElementById('vault-b-address').textContent = data.vault_b_address;
+                if (node === SELF) {
+                    document.getElementById('mining-pool-left').innerText = data.mining_pool_remaining.toLocaleString() + ' QL';
+                }
+                return data;
+            } catch (e) {
+                document.getElementById(prefix + '-status').className = 'status-badge offline';
+                document.getElementById(prefix + '-status').innerText = 'OFFLINE';
+                return null;
+            }
+        }
+
+        function truncateAddress(addr) {
+            if (!addr || addr.length <= 24) return addr;
+            return addr.slice(0, 16) + '…' + addr.slice(-8);
+        }
+
+        async function fetchNodeUsers(node) {
+            if (!node.token) return [];
+            try {
+                const res = await fetch('http://127.0.0.1:' + node.port + '/api/admin/users?token=' + encodeURIComponent(node.token));
+                if (res.status !== 200) return [];
+                const data = await res.json();
+                return (data.users || []).map(u => Object.assign({}, u, { seenOn: node.prefix === 'n1' ? 'Node 1' : 'Node 2' }));
+            } catch (e) {
+                return [];
+            }
+        }
+
+        async function refreshUsers() {
+            const results = await Promise.all([fetchNodeUsers(SELF), fetchNodeUsers(PEER)]);
+            const combined = results[0].concat(results[1]);
+            const seen = new Set();
+            const deduped = [];
+            for (const u of combined) {
+                if (seen.has(u.email)) continue;
+                seen.add(u.email);
+                deduped.push(u);
+            }
+
+            document.getElementById('users-count').innerText = '(' + deduped.length + ')';
+            if (deduped.length === 0) {
+                document.getElementById('users-tbody').innerHTML = '<tr><td colspan="6" style="color:#64748b;">No accounts registered on either node yet.</td></tr>';
+                return;
+            }
+            const rows = deduped.map(function (u) {
+                const date = new Date(u.created_at * 1000);
+                const verifiedBadge = u.verified
+                    ? '<span class="status-badge online">VERIFIED</span>'
+                    : '<span class="status-badge offline">PENDING</span>';
+                return '<tr>' +
+                    '<td>' + (u.full_name || '—') + '</td>' +
+                    '<td>' + verifiedBadge + '</td>' +
+                    '<td>' + u.email + '</td>' +
+                    '<td title="' + u.address + '">' + truncateAddress(u.address) + '</td>' +
+                    '<td>' + date.toLocaleString() + '</td>' +
+                    '<td>' + u.seenOn + '</td>' +
+                    '</tr>';
+            }).join('');
+            document.getElementById('users-tbody').innerHTML = rows;
+        }
+
+        function refreshAll() {
+            fetchNodeAdmin(SELF);
+            fetchNodeAdmin(PEER);
+            refreshUsers();
+        }
+
+        refreshAll();
+        setInterval(refreshAll, 5000);
+
+        document.getElementById('btn-send-tx').addEventListener('click', async () => {
+            const statusBox = document.getElementById('send-status');
+            const fromVault = document.getElementById('send-from-vault').value;
+            const to = document.getElementById('send-to-address').value.trim();
+            const amount = parseFloat(document.getElementById('send-amount').value);
+
+            statusBox.style.display = 'block';
+            statusBox.style.background = 'rgba(124,92,252,0.1)';
+            statusBox.style.color = '#c9baff';
+
+            if (!to) { statusBox.textContent = 'Enter a recipient address.'; return; }
+            if (isNaN(amount) || amount <= 0) { statusBox.textContent = 'Enter a valid amount greater than 0.'; return; }
+
+            statusBox.textContent = 'Signing and broadcasting…';
+
+            try {
+                // Always uses THIS node's own admin port and token, since the
+                // vault key files being signed with live on this node's disk.
+                const body = JSON.stringify({ from_vault: fromVault, to: to, amount: amount });
+                const res = await fetch('/api/admin/send?token=' + encodeURIComponent(OWN_TOKEN), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body,
+                });
+                const rawText = await res.text();
+                let resJson = {};
+                try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+                if (res.ok) {
+                    statusBox.style.background = 'rgba(16,185,129,0.1)';
+                    statusBox.style.color = '#10b981';
+                    statusBox.textContent = 'Queued — will be confirmed when a miner produces the next block.';
+                    document.getElementById('send-to-address').value = '';
+                    document.getElementById('send-amount').value = '';
+                } else {
+                    throw new Error(resJson.error || 'Node rejected the transaction.');
+                }
+            } catch (e) {
+                statusBox.style.background = 'rgba(239,68,68,0.1)';
+                statusBox.style.color = '#ef4444';
+                statusBox.textContent = e.message || 'Could not reach the node.';
+            }
+        });
+    </script>
+</body>
+</html>
