@@ -1,0 +1,28 @@
+[package]
+name = "ql-miner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "miner"
+path = "src/main.rs"
+
+[dependencies]
+# Deliberately minimal — none of these need a C/C++ toolchain, which is
+# exactly the point of splitting this out from the main node project.
+sha3 = "0.10"
+hex = "0.4.3"
+chrono = "0.4"
+getrandom = "0.4"
+# Pure-Rust TLS (not native-tls) — deliberately avoids pulling OpenSSL back
+# into the build, which would undo the whole reason this miner was split
+# into its own lightweight project in the first place. Explicitly using the
+# "ring" crypto backend instead of rustls's default (aws-lc-rs), which
+# vendors much larger per-platform C source files — those alone caused a
+# disk-space build failure on one machine, and would likely trip up anyone
+# else building this with limited free space too.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+
+[profile.release]
+opt-level = 3
