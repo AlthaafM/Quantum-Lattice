@@ -1,192 +1,332 @@
-mod ledger;
-mod network;
-mod consensus;
-mod wallet;
-mod users;
-mod email;
-mod ratelimit;
+// Quantum-Lattice (QL) mining client — standalone project.
+//
+// Deliberately kept as its own separate, minimal Cargo project rather than
+// living inside the main node's codebase. The node depends on RocksDB (a
+// full C++ database), which needs real build tooling (CMake, a C++
+// compiler, and on Windows specifically, Visual Studio Build Tools) to
+// compile from source. This miner never touches the database at all, so
+// keeping it separate means anyone building it — especially on Windows —
+// only needs a plain Rust toolchain, nothing else.
+//
+// Connects over plain HTTP to a raw IP address or "localhost" (for local
+// testing, matching how this has always worked) — and over real HTTPS,
+// via a pure-Rust TLS stack (rustls, not native-tls/OpenSSL — keeping the
+// whole point of this being a lightweight, no-C-toolchain build), to any
+// real domain name. Cloudflare Tunnel (and most reverse proxies) only
+// accept genuine TLS traffic on port 443, not the internal port a domain
+// happens to map to — so a real hostname always connects on 443
+// regardless of what port was typed alongside it.
+//
+// IMPORTANT: calculate_pow_hash below MUST stay byte-for-byte identical to
+// BlockHeader::calculate_pow_hash in src/ledger.rs. If one changes without
+// the other, mining will silently never succeed — the hashes just won't
+// match. This duplication is a real maintenance risk; unifying both under a
+// shared library crate is worth doing later, but out of scope for this pass.
+//
+// This miner does NOT generate its own reward identity. Instead, you give it
+// an address you already own — from your QL Wallet — and rewards land there
+// directly. No separate mining account, no separate secret key to protect
+// or lose, no import step needed afterward: whatever this mines is already
+// sitting in a wallet you control.
+//
+// Usage: cargo run --bin miner -- quantum-lattice.futuristicai.co.za:8034 YOUR_WALLET_ADDRESS_HEX
 
-use ledger::{Block, BlockHeader, Transaction};
-use network::P2PNode;
-use consensus::{ConsensusEngine, ConsensusState, STATE_KEY};
-use rocksdb::{DB, Options};
-use bincode::{serialize, deserialize};
-use std::env;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::time::Duration;
 use sha3::{Digest, Sha3_256};
+use std::env;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+use std::thread;
+use std::sync::Arc;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::pki_types::ServerName;
 
-/// Generates (once) or loads a persistent admin token per node. Not a
-/// cryptographic-grade RNG — it's a hash of current time + process ID, which
-/// is fine for a local single-operator dev token, not something to rely on
-/// for a production secret in a hostile environment.
-fn get_or_create_admin_token(key_prefix: &str) -> String {
-    let path = format!("{}_admin_token.txt", key_prefix);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let trimmed = existing.trim().to_string();
-        if !trimmed.is_empty() {
-            return trimmed;
-        }
-    }
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let seed = format!("{}-{}", nanos, std::process::id());
-    let mut hasher = Sha3_256::new();
-    hasher.update(seed.as_bytes());
-    let token = hex::encode(hasher.finalize());
-
-    std::fs::write(&path, &token).expect("Failed to write admin token file");
-    token
+fn now() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-#[tokio::main]
-async fn main() {
-    // Loads secrets.env if present (SMTP credentials for email
-    // verification). Silently continues if missing — email verification
-    // simply won't work until it's added, but nothing else depends on it.
-    dotenvy::from_filename("secrets.env").ok();
+/// Wraps either a plain TCP connection (local testing) or a real TLS
+/// connection (public domains) behind one type, so the rest of the code
+/// (the actual HTTP request/response logic below) never needs to know or
+/// care which one it's using.
+enum Conn {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
 
-    println!("=== QUANTUM-LATTICE (QL) SOVEREIGN POST-QUANTUM ENGINE BOOTING ===");
-    println!("[INFO] Incorporated by FuturisticAI");
+impl Read for Conn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.read(buf),
+            Conn::Tls(s) => s.read(buf),
+        }
+    }
+}
 
-    let args: Vec<String> = env::args().collect();
-    let node_mode = if args.len() > 1 { &args[1] } else { "node1" };
+impl Write for Conn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.write(buf),
+            Conn::Tls(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Conn::Plain(s) => s.flush(),
+            Conn::Tls(s) => s.flush(),
+        }
+    }
+}
 
-    let (p2p_port, rpc_port, admin_port, db_path, key_prefix, peers) = if node_mode == "node2" {
-        (9033, 9034, 19034, "./ql_db_node2", "operational_vault_b", vec!["127.0.0.1:8033".to_string()])
+fn is_local_address(host: &str) -> bool {
+    host == "localhost" || host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Opens a connection to node_address ("host:port" or a bare "host"),
+/// choosing plain TCP or real TLS based on whether the host looks like a
+/// local address or a real domain name. Returns the connection plus the
+/// exact host string to use in the HTTP request's Host header.
+fn connect(node_address: &str) -> Option<(Conn, String)> {
+    let host = node_address.split(':').next().unwrap_or(node_address).to_string();
+
+    if is_local_address(&host) {
+        // Local/dev testing — unchanged from how this always worked.
+        let stream = TcpStream::connect(node_address).ok()?;
+        Some((Conn::Plain(stream), node_address.to_string()))
     } else {
-        (8033, 8034, 18034, "./ql_db_node1", "master_vault_a", vec!["127.0.0.1:9033".to_string()])
-    };
+        // A real domain name — connect on 443 regardless of whatever port
+        // was typed alongside it, since that's the only port a public
+        // HTTPS-fronted domain actually accepts connections on.
+        let mut root_store = RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
 
-    println!(
-        "[CONFIG] Active profile: {} | DB: {} | Admin(loopback): {}",
-        node_mode.to_uppercase(),
-        db_path,
-        admin_port
+        let server_name = ServerName::try_from(host.clone()).ok()?;
+        let conn = ClientConnection::new(Arc::new(config), server_name).ok()?;
+        let sock = TcpStream::connect((host.as_str(), 443)).ok()?;
+        let tls_stream = StreamOwned::new(conn, sock);
+        Some((Conn::Tls(Box::new(tls_stream)), host))
+    }
+}
+
+fn http_get(host_port: &str, path: &str) -> Option<String> {
+    let (mut conn, host_header) = connect(host_port)?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host_header
     );
+    conn.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    conn.read_to_string(&mut response).ok()?;
+    Some(response)
+}
 
-    println!("[INIT] Unlocking vault keys — you'll be prompted for each vault's password.");
-    let vault_a_seed = wallet::unlock_or_create_vault("master_vault_a");
-    let vault_b_seed = wallet::unlock_or_create_vault("operational_vault_b");
-    let vault_a_seed = Arc::new(vault_a_seed);
-    let vault_b_seed = Arc::new(vault_b_seed);
+fn http_post(host_port: &str, path: &str, body: &str) -> Option<String> {
+    let (mut conn, host_header) = connect(host_port)?;
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path, host_header, body.len(), body
+    );
+    conn.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    conn.read_to_string(&mut response).ok()?;
+    Some(response)
+}
 
-    let mut opts = Options::default();
-    opts.create_if_missing(true);
-    let db = DB::open(&opts, db_path).expect("Failed to open database");
-    println!("[SUCCESS] RocksDB locked to: {}", db_path);
+fn extract_json_string(body: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = body.find(&pattern)?;
+    let after_key = &body[key_pos + pattern.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+    let value_start = after_colon.strip_prefix('"')?;
+    let end_quote = value_start.find('"')?;
+    Some(value_start[..end_quote].to_string())
+}
 
-    let vault_a_bytes = std::fs::read("master_vault_a_public.key").expect("vault A key missing");
-    let vault_b_bytes = std::fs::read("operational_vault_b_public.key").expect("vault B key missing");
+fn extract_json_number(body: &str, key: &str) -> Option<u64> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = body.find(&pattern)?;
+    let after_key = &body[key_pos + pattern.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+    let end = after_colon.find(|c: char| c == ',' || c == '}').unwrap_or(after_colon.len());
+    after_colon[..end].trim().parse::<u64>().ok()
+}
 
-    // ---- THE CORE FIX: load real chain state if it exists, only run genesis once ----
-    let engine = match db.get(STATE_KEY).unwrap() {
-        Some(bytes) => {
-            let state: ConsensusState = deserialize(&bytes).expect("Corrupt consensus state");
-            ConsensusEngine::from_state(state)
+/// Must exactly match BlockHeader::calculate_pow_hash in src/ledger.rs.
+fn calculate_pow_hash(
+    version: u32,
+    previous_block_hash: &[u8],
+    merkle_root: &[u8],
+    block_height: u64,
+    miner: &[u8],
+    nonce: u64,
+) -> Vec<u8> {
+    let mut hasher = Sha3_256::new();
+    hasher.update(&version.to_le_bytes());
+    hasher.update(previous_block_hash);
+    hasher.update(merkle_root);
+    hasher.update(&block_height.to_le_bytes());
+    hasher.update(miner);
+    hasher.update(&nonce.to_le_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Must exactly match consensus::meets_difficulty in src/consensus.rs — a
+/// bit-based check (not whole bytes), since Phase 6 added real difficulty
+/// retargeting which needs finer granularity than 256x jumps.
+fn meets_difficulty(hash: &[u8], required_bits: u32) -> bool {
+    let mut bits_checked: u32 = 0;
+    for byte in hash {
+        if bits_checked + 8 <= required_bits {
+            if *byte != 0 {
+                return false;
+            }
+            bits_checked += 8;
+        } else {
+            let remaining_bits = required_bits - bits_checked;
+            if remaining_bits == 0 {
+                return true;
+            }
+            let mask: u8 = 0xFFu8 << (8 - remaining_bits);
+            return byte & mask == 0;
         }
-        None => {
-            let engine = ConsensusEngine::genesis(vault_a_bytes.clone(), vault_b_bytes.clone());
+    }
+    true
+}
 
-            // FIXED, not chrono::Utc::now(). Every node must independently
-            // compute a BYTE-IDENTICAL genesis block, or their chains can
-            // never link — a real-time timestamp here was the actual bug
-            // behind "chains have diverged" on first sync.
-            const GENESIS_TIMESTAMP: i64 = 1_735_689_600; // 2025-01-01T00:00:00Z, arbitrary fixed epoch
+fn print_usage_and_exit() -> ! {
+    eprintln!("=== QUANTUM-LATTICE (QL) MINING CLIENT ===");
+    eprintln!();
+    eprintln!("Usage: miner NODE_ADDRESS:PORT YOUR_WALLET_ADDRESS_HEX");
+    eprintln!();
+    eprintln!("  NODE_ADDRESS:PORT       The QL node to mine against, e.g. 127.0.0.1:8034");
+    eprintln!("  YOUR_WALLET_ADDRESS_HEX Your own QL Wallet address (get this from the wallet's");
+    eprintln!("                          dashboard) — this is where mining rewards are paid.");
+    eprintln!();
+    eprintln!("Example:");
+    eprintln!("  miner quantum-lattice.futuristicai.co.za:8034 b8bd5b6d7983d328...5673");
+    std::process::exit(1);
+}
 
-            let header = BlockHeader {
-                version: 1,
-                previous_block_hash: vec![0; 32],
-                merkle_root: vec![0; 32],
-                timestamp: GENESIS_TIMESTAMP,
-                block_height: 0,
-                miner: vec![], // genesis has no miner — nothing was mined
-                nonce: 0,
-            };
-            let genesis_block = Block { header, transactions: vec![] };
-            let genesis_hash = genesis_block.calculate_hash();
-            println!("[CONSENSUS] Genesis Block Hash: {}", hex::encode(&genesis_hash));
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        print_usage_and_exit();
+    }
+    let node_address = args[1].clone();
+    let miner_pk_hex = args[2].trim();
 
-            db.put(b"block_0", serialize(&genesis_block).unwrap()).unwrap();
-            db.put(STATE_KEY, serialize(&engine.state).unwrap()).unwrap();
-            engine
+    let miner_pk = match hex::decode(miner_pk_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            eprintln!("[MINER] That doesn't look like a valid address — it should be hex characters only (0-9, a-f), no spaces.");
+            print_usage_and_exit();
         }
     };
-
-    println!(
-        "[CONSENSUS] Height: {} | Supply: {} QL",
-        engine.state.chain_height,
-        engine.state.total_minted_supply / consensus::COIN
-    );
-
-    let engine = Arc::new(Mutex::new(engine));
-    let mempool: Arc<Mutex<Vec<Transaction>>> = Arc::new(Mutex::new(Vec::new()));
-    let rate_limiter = Arc::new(ratelimit::RateLimiter::new());
-    let db = Arc::new(db);
-
-    let admin_token = get_or_create_admin_token(key_prefix);
-    println!(
-        "[ADMIN] Dashboard URL: http://127.0.0.1:{}/?token={}",
-        admin_port, admin_token
-    );
-    println!(
-        "[ADMIN] For the combined Master view showing BOTH nodes, add the other node's token: http://127.0.0.1:{}/?token={}&peer_token=OTHER_NODE_TOKEN",
-        admin_port, admin_token
-    );
-
-    let p2p_node = P2PNode::new(p2p_port, rpc_port);
-    p2p_node
-        .start_p2p_server(engine.clone(), db.clone(), peers.clone())
-        .await
-        .expect("P2P server failed");
-    p2p_node
-        .start_rpc_server(db_path.to_string(), engine.clone(), mempool.clone(), db.clone(), peers.clone(), rate_limiter.clone())
-        .await
-        .expect("RPC server failed");
-    p2p_node
-        .start_admin_server(admin_port, engine.clone(), vault_a_bytes.clone(), vault_b_bytes.clone(), admin_token, db.clone(), mempool.clone(), vault_a_seed.clone(), vault_b_seed.clone())
-        .await
-        .expect("Admin server failed");
-
-    // Phase 4: catch up immediately on boot in case blocks were produced
-    // while this node was offline — don't wait for the next gossiped block
-    // to reveal the gap.
-    println!("[STARTUP] Checking peers for any blocks we missed while offline...");
-    P2PNode::catch_up(engine.clone(), db.clone(), peers.clone()).await;
-
-    println!(
-        "\n[NODE ONLINE] P2P: {} | Public RPC: {} | Admin(loopback only): {}",
-        p2p_port, rpc_port, admin_port
-    );
-
-    // ---- Test transaction ----
-    // Still queues a real signed transfer so there's something for an
-    // external miner to include — but nothing gets mined automatically
-    // anymore. A block only gets produced when a miner actually submits
-    // valid proof-of-work via /api/mining/submit (see network.rs and
-    // src/bin/miner.rs).
-    if node_mode != "node2" {
-        let test_amount: u64 = 1 * consensus::COIN;
-        let mut message = Vec::new();
-        message.extend_from_slice(&vault_a_bytes);
-        message.extend_from_slice(&vault_b_bytes);
-        message.extend_from_slice(&test_amount.to_le_bytes());
-        let signature = wallet::sign_with_seed_bytes(&vault_a_seed, &message);
-
-        let test_tx = Transaction::new(vault_a_bytes.clone(), vault_b_bytes.clone(), test_amount, signature);
-        mempool.lock().await.push(test_tx);
-        println!("[TEST] Queued a signed 1 QL transfer (Vault A -> Vault B) into the mempool.");
+    if miner_pk.len() != 1952 {
+        eprintln!(
+            "[MINER] That address is {} bytes — a QL Wallet address should be exactly 1952 bytes (3904 hex characters). Double-check you copied the whole thing.",
+            miner_pk.len()
+        );
+        print_usage_and_exit();
     }
 
-    println!("[MINING] Waiting for a miner to submit proof-of-work — run: cargo run --bin miner -- 127.0.0.1:{}", rpc_port);
+    println!("=== QUANTUM-LATTICE (QL) MINING CLIENT ===");
+    println!("[CONFIG] Connecting to node: {}", node_address);
+    println!("[MINER] Mining rewards will be paid to: {}", hex::encode(&miner_pk));
 
-    // Everything from here runs in spawned background tasks (P2P, RPC,
-    // admin). This just keeps the process alive.
     loop {
-        tokio::time::sleep(Duration::from_secs(3600)).await;
+        let fetch_start = now();
+        let response = match http_get(&node_address, "/api/mining/template") {
+            Some(r) => r,
+            None => {
+                println!("[MINER] Could not reach node at {} — retrying in 5s...", node_address);
+                thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
+        let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
+
+        let block_height = match extract_json_number(body, "block_height") {
+            Some(h) => h,
+            None => { thread::sleep(Duration::from_secs(5)); continue; }
+        };
+        let prev_hash_hex = match extract_json_string(body, "previous_block_hash") {
+            Some(h) => h,
+            None => { thread::sleep(Duration::from_secs(5)); continue; }
+        };
+        let merkle_root_hex = match extract_json_string(body, "merkle_root") {
+            Some(h) => h,
+            None => { thread::sleep(Duration::from_secs(5)); continue; }
+        };
+        let difficulty = extract_json_number(body, "difficulty_bits").unwrap_or(20) as u32;
+
+        let prev_hash = hex::decode(&prev_hash_hex).unwrap_or_default();
+        let merkle_root = hex::decode(&merkle_root_hex).unwrap_or_default();
+
+        println!(
+            "[{}] [MINER] Got template for block {} (fetch started {}) — mining at {} leading zero bit(s)...",
+            now(), block_height, fetch_start, difficulty
+        );
+
+        let hash_start = now();
+        let mut start_nonce_bytes = [0u8; 8];
+        getrandom::fill(&mut start_nonce_bytes).expect("OS randomness unavailable");
+        let mut nonce: u64 = u64::from_le_bytes(start_nonce_bytes);
+        let batch_start_nonce = nonce;
+        let mut tried: u64 = 0;
+        let mut found = false;
+        loop {
+            let hash = calculate_pow_hash(1, &prev_hash, &merkle_root, block_height, &miner_pk, nonce);
+            if meets_difficulty(&hash, difficulty) {
+                found = true;
+                break;
+            }
+            nonce = nonce.wrapping_add(1);
+            tried += 1;
+            // Periodically bail out and refetch the template in case someone
+            // else (or our own test tx cycle) already produced this block —
+            // otherwise we could grind forever on a stale target. Each batch
+            // starts from a fresh random nonce (see above) so a refetch
+            // actually explores new search space instead of re-checking the
+            // exact same doomed range every time.
+            if tried % 2_000_000 == 0 {
+                break;
+            }
+        }
+        println!(
+            "[{}] [MINER] Batch of {} nonces finished (started {}, from nonce {}) — {}",
+            now(), tried, hash_start, batch_start_nonce, if found { "FOUND" } else { "no match, refetching" }
+        );
+
+        if !found {
+            continue;
+        }
+
+        let submit_body = format!(
+            "{{\"miner\":\"{}\",\"nonce\":{}}}",
+            hex::encode(&miner_pk),
+            nonce
+        );
+        match http_post(&node_address, "/api/mining/submit", &submit_body) {
+            Some(resp) => {
+                let resp_body = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+                if resp.starts_with("HTTP/1.1 200") {
+                    println!("[MINER] Block accepted! {}", resp_body);
+                } else {
+                    let wait_secs = extract_json_number(resp_body, "retry_after_secs").unwrap_or(2);
+                    println!(
+                        "[MINER] Submission rejected — {} — waiting {}s before retrying.",
+                        resp_body, wait_secs
+                    );
+                    thread::sleep(Duration::from_secs(wait_secs));
+                }
+            }
+            None => println!("[MINER] Failed to submit — node unreachable."),
+        }
     }
 }
