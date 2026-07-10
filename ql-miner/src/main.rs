@@ -89,9 +89,17 @@ fn is_local_address(host: &str) -> bool {
 fn connect(node_address: &str) -> Option<(Conn, String)> {
     let host = node_address.split(':').next().unwrap_or(node_address).to_string();
 
+    // Without this, a connection that stalls mid-request (a dropped packet
+    // on a flaky WiFi connection, for instance) hangs the whole program
+    // indefinitely — no crash, no error, just silence — since std's
+    // TcpStream has no timeout at all by default.
+    const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
+
     if is_local_address(&host) {
         // Local/dev testing — unchanged from how this always worked.
         let stream = TcpStream::connect(node_address).ok()?;
+        stream.set_read_timeout(Some(NETWORK_TIMEOUT)).ok()?;
+        stream.set_write_timeout(Some(NETWORK_TIMEOUT)).ok()?;
         Some((Conn::Plain(stream), node_address.to_string()))
     } else {
         // A real domain name — connect on 443 regardless of whatever port
@@ -106,6 +114,8 @@ fn connect(node_address: &str) -> Option<(Conn, String)> {
         let server_name = ServerName::try_from(host.clone()).ok()?;
         let conn = ClientConnection::new(Arc::new(config), server_name).ok()?;
         let sock = TcpStream::connect((host.as_str(), 443)).ok()?;
+        sock.set_read_timeout(Some(NETWORK_TIMEOUT)).ok()?;
+        sock.set_write_timeout(Some(NETWORK_TIMEOUT)).ok()?;
         let tls_stream = StreamOwned::new(conn, sock);
         Some((Conn::Tls(Box::new(tls_stream)), host))
     }
