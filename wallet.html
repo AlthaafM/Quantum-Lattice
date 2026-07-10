@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quantum-Lattice Wallet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root {
+    --void: #07070d;
+    --deep: #0d0e1a;
+    --panel: #12132472;
+    --panel-solid: #14152a;
+    --edge: #262842;
+    --lattice-a: #7c5cfc;
+    --lattice-b: #22d3c5;
+    --warn: #f0b429;
+    --danger: #f26d6d;
+    --success: #34d399;
+    --text: #eae8f5;
+    --text-dim: #8b87a8;
+    --text-faint: #5b5878;
+    --mono: 'JetBrains Mono', monospace;
+    --display: 'Space Grotesk', sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--void);
+    color: var(--text);
+    font-family: var(--display);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ---- Lattice background: a literal triangular lattice, since that's what
+     the cryptography is named for. Locked = dim, disordered drift.
+     Unlocked = brief resolve-into-order animation, then quiet ambient hum. ---- */
+  #lattice-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background-color: var(--void);
+    background-image:
+      linear-gradient(30deg, #1a1c33 1px, transparent 1px),
+      linear-gradient(150deg, #1a1c33 1px, transparent 1px),
+      linear-gradient(90deg, #14152a 1px, transparent 1px);
+    background-size: 64px 110px, 64px 110px, 64px 110px;
+    opacity: 0.5;
+    animation: driftLattice 60s linear infinite;
+  }
+  @keyframes driftLattice {
+    0% { background-position: 0 0, 0 0, 0 0; }
+    100% { background-position: 640px 0, -640px 0, 0 1100px; }
+  }
+  #lattice-glow {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background: radial-gradient(ellipse 900px 700px at 50% -10%, rgba(124,92,252,0.16), transparent 60%),
+                radial-gradient(ellipse 700px 600px at 90% 100%, rgba(34,211,197,0.10), transparent 60%);
+    pointer-events: none;
+  }
+  body.unlocked-flash #lattice-bg { animation: resolveLattice 1.4s ease-out; }
+  @keyframes resolveLattice {
+    0% { opacity: 0.15; filter: blur(3px); }
+    50% { opacity: 0.9; filter: blur(0px); }
+    100% { opacity: 0.5; filter: blur(0px); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #lattice-bg { animation: none; }
+    body.unlocked-flash #lattice-bg { animation: none; }
+  }
+
+  .stage {
+    position: relative;
+    z-index: 1;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 20px 80px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 40px;
+    letter-spacing: 0.02em;
+  }
+  .brand .mark {
+    width: 30px; height: 30px;
+    background: conic-gradient(from 45deg, var(--lattice-a), var(--lattice-b), var(--lattice-a));
+    clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  }
+  .brand .name { font-weight: 600; font-size: 15px; }
+  .brand .name b { font-weight: 700; }
+  .brand .sub { font-size: 11px; color: var(--text-faint); margin-left: 6px; }
+
+  .card {
+    background: var(--panel);
+    backdrop-filter: blur(18px);
+    border: 1px solid var(--edge);
+    border-radius: 18px;
+    padding: 32px;
+    width: 100%;
+    max-width: 440px;
+    box-shadow: 0 30px 60px -20px rgba(0,0,0,0.6);
+  }
+
+  .card h1 { font-size: 22px; margin: 0 0 6px; font-weight: 700; }
+  .card p.lead { color: var(--text-dim); font-size: 14px; margin: 0 0 26px; line-height: 1.5; }
+
+  .tabs { display: flex; gap: 4px; background: #0a0b16; border-radius: 12px; padding: 4px; margin-bottom: 24px; }
+  .tab {
+    flex: 1; text-align: center; padding: 10px 0; border-radius: 9px;
+    font-size: 13px; font-weight: 600; color: var(--text-dim); cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .tab.active { background: var(--panel-solid); color: var(--text); box-shadow: inset 0 0 0 1px var(--edge); }
+
+  label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 16px 0 6px; letter-spacing: 0.02em; text-transform: uppercase; }
+  label:first-of-type { margin-top: 0; }
+
+  input[type="password"], input[type="text"], input[type="number"] {
+    width: 100%;
+    background: #0a0b16;
+    border: 1px solid var(--edge);
+    border-radius: 10px;
+    padding: 13px 14px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  input:focus { border-color: var(--lattice-a); }
+  input::placeholder { color: var(--text-faint); }
+
+  .strength { height: 4px; border-radius: 2px; background: #1c1d33; margin-top: 8px; overflow: hidden; }
+  .strength-bar { height: 100%; width: 0%; background: var(--danger); transition: all 0.25s ease; }
+
+  .btn {
+    width: 100%;
+    padding: 14px;
+    border-radius: 12px;
+    border: none;
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    margin-top: 22px;
+    transition: transform 0.1s ease, opacity 0.15s ease;
+  }
+  .btn:active { transform: scale(0.98); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: linear-gradient(135deg, var(--lattice-a), #5a3fd6); color: white; }
+  .btn-ghost { background: transparent; border: 1px solid var(--edge); color: var(--text); }
+  .btn-danger { background: rgba(242,109,109,0.12); border: 1px solid rgba(242,109,109,0.35); color: var(--danger); }
+  .btn-sm { padding: 9px 14px; font-size: 12px; margin-top: 0; width: auto; }
+
+  .warn-box {
+    background: rgba(240,180,41,0.08);
+    border: 1px solid rgba(240,180,41,0.3);
+    border-radius: 12px;
+    padding: 16px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: #f5d78a;
+    margin: 20px 0;
+  }
+  .warn-box b { color: var(--warn); }
+
+  .checkline { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--text-dim); margin-top: 16px; cursor: pointer; }
+  .checkline input { margin-top: 3px; }
+
+  .error-msg { color: var(--danger); font-size: 13px; margin-top: 10px; display: none; }
+  .info-msg { color: var(--text-dim); font-size: 12px; margin-top: 10px; }
+
+  /* ---- Dashboard ---- */
+  .dash { width: 100%; max-width: 900px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .dash { grid-template-columns: 1fr; } }
+  .dash .full { grid-column: 1 / -1; }
+
+  .panel {
+    background: var(--panel);
+    backdrop-filter: blur(18px);
+    border: 1px solid var(--edge);
+    border-radius: 16px;
+    padding: 24px;
+  }
+  .panel .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); font-weight: 600; margin-bottom: 10px; }
+
+  .addr-row { display: flex; align-items: center; gap: 12px; }
+  .addr-value {
+    font-family: var(--mono); font-size: 12.5px; color: var(--text);
+    background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px;
+    padding: 12px 14px; word-break: break-all; flex: 1; line-height: 1.5;
+  }
+  .qr-wrap { background: white; border-radius: 12px; padding: 10px; display: inline-flex; margin-top: 14px; }
+
+  .balance-value { font-family: var(--mono); font-size: 40px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 0; }
+  .balance-unit { font-size: 15px; color: var(--text-dim); margin-left: 8px; font-family: var(--display); }
+  .balance-sub { font-size: 12px; color: var(--text-faint); margin-top: 6px; }
+  .pulse-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); display: inline-block; margin-right: 6px; animation: pulseDot 2s ease-in-out infinite; }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .copy-btn { background: var(--panel-solid); border: 1px solid var(--edge); color: var(--text-dim); border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+  .copy-btn:hover { color: var(--text); border-color: var(--lattice-a); }
+
+  .send-status { margin-top: 14px; font-size: 13px; padding: 12px; border-radius: 10px; display: none; }
+  .send-status.pending { display: block; background: rgba(124,92,252,0.1); border: 1px solid rgba(124,92,252,0.3); color: #c9baff; }
+  .send-status.ok { display: block; background: rgba(52,211,153,0.1); border: 1px solid rgba(52,211,153,0.3); color: var(--success); }
+  .send-status.fail { display: block; background: rgba(242,109,109,0.1); border: 1px solid rgba(242,109,109,0.3); color: var(--danger); }
+
+  .activity-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--edge); font-size: 13px; }
+  .activity-item:last-child { border-bottom: none; }
+  .activity-item .label { color: var(--text-dim); }
+  .activity-item .val { font-family: var(--mono); }
+  .empty-note { color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px 0; }
+
+  .top-bar { width: 100%; max-width: 900px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .node-config { font-size: 12px; color: var(--text-faint); display: flex; align-items: center; gap: 8px; }
+  .node-config input { background: transparent; border: none; color: var(--text-dim); font-family: var(--mono); font-size: 12px; width: 160px; outline: none; border-bottom: 1px dashed var(--edge); padding: 2px 0; }
+
+  a.mut-link { color: var(--lattice-b); text-decoration: none; font-size: 12px; }
+  a.mut-link:hover { text-decoration: underline; }
+
+  #screen-backup .keystore-preview {
+    font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+    background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px;
+    padding: 12px; max-height: 90px; overflow: hidden; word-break: break-all; margin-top: 10px;
+  }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="lattice-bg"></div>
+<div id="lattice-glow"></div>
+
+<div class="stage">
+  <div class="top-bar">
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <span class="name"><b>QUANTUM</b>-LATTICE</span>
+        <span class="sub">WALLET · NON-CUSTODIAL</span>
+      </div>
+    </div>
+    <div class="node-config">
+      NODE&nbsp;
+      <input id="node-url" type="text" value="127.0.0.1:8034" spellcheck="false">
+    </div>
+  </div>
+
+  <!-- ========== AUTH SCREEN ========== -->
+  <div id="screen-auth" class="card">
+    <div class="tabs">
+      <div class="tab active" data-tab="create">Create Wallet</div>
+      <div class="tab" data-tab="unlock">Unlock Wallet</div>
+      <div class="tab" data-tab="account">Account</div>
+    </div>
+
+    <!-- Create -->
+    <div id="tab-create">
+      <h1>Create a new wallet</h1>
+      <p class="lead">Your keys are generated on this device and never leave it unencrypted. Only your email and this wallet's public address (not your keys) are sent to the node, for your own record and admin visibility.</p>
+
+      <label>Full name (optional)</label>
+      <input type="text" id="create-name" placeholder="Your name" autocomplete="name">
+
+      <label>Email address</label>
+      <input type="text" id="create-email" placeholder="you@example.com" autocomplete="email">
+
+      <label>Choose a wallet password</label>
+      <input type="password" id="create-pw" placeholder="At least 10 characters" autocomplete="new-password">
+      <div class="strength"><div class="strength-bar" id="strength-bar"></div></div>
+
+      <label>Confirm wallet password</label>
+      <input type="password" id="create-pw2" placeholder="Re-enter password" autocomplete="new-password">
+
+      <div class="error-msg" id="create-error"></div>
+
+      <button class="btn btn-primary" id="btn-generate">Generate wallet</button>
+    </div>
+
+    <!-- Unlock -->
+    <div id="tab-unlock" class="hidden">
+      <h1>Unlock your wallet</h1>
+      <p class="lead">Load your keystore file and enter your password. Decryption happens entirely on this device.</p>
+
+      <label>Keystore file</label>
+      <input type="file" id="keystore-file" accept="application/json">
+      <div class="info-msg" id="keystore-file-info">No file selected — will check this browser's local storage instead.</div>
+
+      <label>Password</label>
+      <input type="password" id="unlock-pw" placeholder="Wallet password" autocomplete="current-password">
+
+      <div class="error-msg" id="unlock-error"></div>
+
+      <button class="btn btn-primary" id="btn-unlock">Unlock</button>
+
+      <p style="margin-top:18px; text-align:center;">
+        <a class="mut-link" href="#" id="link-show-restore">Lost your keystore file? Restore from your 24-word seed phrase instead</a>
+      </p>
+    </div>
+
+    <!-- Restore from seed phrase (no keystore file needed, only the 24 words) -->
+    <div id="tab-restore" class="hidden">
+      <h1>Restore from seed phrase</h1>
+      <p class="lead">Enter your 24 words in order, separated by spaces. This rebuilds your wallet directly — you'll set a fresh password and get a new keystore file at the end.</p>
+
+      <label>Seed phrase (24 words)</label>
+      <textarea id="restore-phrase" rows="3" style="width:100%; background:#0a0b16; border:1px solid var(--edge); border-radius:10px; padding:13px 14px; color:var(--text); font-family:var(--mono); font-size:13px; resize:vertical;" placeholder="word1 word2 word3 ..."></textarea>
+
+      <label>New wallet password</label>
+      <input type="password" id="restore-pw" placeholder="At least 10 characters" autocomplete="new-password">
+
+      <label>Confirm new password</label>
+      <input type="password" id="restore-pw2" placeholder="Re-enter password" autocomplete="new-password">
+
+      <div class="error-msg" id="restore-error"></div>
+
+      <button class="btn btn-primary" id="btn-restore">Restore wallet</button>
+
+      <p style="margin-top:18px; text-align:center;">
+        <a class="mut-link" href="#" id="link-show-unlock">Back to keystore file unlock</a>
+      </p>
+    </div>
+
+    <!-- Account (directory layer — separate from wallet key security, no password) -->
+    <div id="tab-account" class="hidden">
+      <h1>Link another address (optional)</h1>
+      <p class="lead">For a second or existing wallet you'd like recorded too — your main wallet is already linked automatically when you create it. This is purely a directory; it cannot unlock or move funds.</p>
+
+      <div class="tabs" style="margin-bottom: 20px;">
+        <div class="tab active" data-account-tab="register">Register</div>
+        <div class="tab" data-account-tab="lookup">Look up</div>
+      </div>
+
+      <div id="account-register">
+        <label>Full name (optional)</label>
+        <input type="text" id="reg-name" placeholder="Your name" autocomplete="name">
+
+        <label>Email</label>
+        <input type="text" id="reg-email" placeholder="you@example.com" autocomplete="email">
+
+        <label>Wallet address (hex)</label>
+        <input type="text" id="reg-address" placeholder="Paste the address you want linked to this email">
+
+        <div class="error-msg" id="account-error"></div>
+        <div class="info-msg" id="account-success" style="color: var(--success); display:none;"></div>
+
+        <button class="btn btn-primary" id="btn-register">Register</button>
+      </div>
+
+      <div id="account-lookup" class="hidden">
+        <p class="lead" style="margin-top:0;">Checks which address is linked to an email — informational only, this cannot unlock or move funds.</p>
+        <label>Email</label>
+        <input type="text" id="lookup-email" placeholder="you@example.com" autocomplete="email">
+
+        <div class="error-msg" id="lookup-error"></div>
+        <div class="info-msg" id="lookup-result" style="display:none;"></div>
+
+        <button class="btn btn-primary" id="btn-lookup">Look up</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== BACKUP / KEYSTORE DOWNLOAD SCREEN ========== -->
+  <div id="screen-backup" class="card hidden">
+    <h1>Save your keystore now</h1>
+    <p class="lead">This file, combined with your password, is the <b>only</b> way to access this wallet. There is no "forgot password" — not for you, not for us.</p>
+
+    <div class="warn-box">
+      <b>If you lose this file and your password, your QL is gone permanently.</b>
+      Quantum-Lattice is non-custodial — we never see your key, so we cannot recover it for you under any circumstances.
+    </div>
+
+    <button class="btn btn-ghost" id="btn-download-keystore">⬇️ Download keystore file</button>
+    <div class="keystore-preview" id="keystore-preview"></div>
+
+    <div class="warn-box" style="margin-top:24px;">
+      <b>Your recovery seed phrase — write this on paper. Never save it as a file, photo, or note on any device.</b>
+      Unlike the keystore file above, these words alone (no password) give full, immediate access to this wallet.
+    </div>
+    <div id="seed-phrase-grid" style="font-family: var(--mono); font-size: 13px; line-height: 1.8; background:#0a0b16; border:1px solid var(--edge); border-radius:10px; padding:16px; display:grid; grid-template-columns: repeat(3, 1fr); gap:6px 16px;"></div>
+    <div class="info-msg" style="margin-top:12px;">Raw seed (hex) — same secret, shown as bytes rather than words:</div>
+    <div class="addr-value" id="seed-hex-value" style="font-size:11px; margin-top:6px;"></div>
+
+    <div class="warn-box" style="margin-top:24px; background: rgba(34,211,197,0.08); border-color: rgba(34,211,197,0.3); color: #a8e8e0;">
+      <b>Verify your email</b> — we just sent a 6-digit code to the email you entered. This only confirms you own that inbox; it never affects your wallet's security or access.
+    </div>
+    <label>Verification code</label>
+    <input type="text" id="verify-code" placeholder="6-digit code" maxlength="6" inputmode="numeric" style="letter-spacing: 4px; text-align:center; font-size:18px;">
+    <div class="error-msg" id="verify-error"></div>
+    <div class="info-msg" id="verify-success" style="color: var(--success); display:none;"></div>
+    <div style="display:flex; gap:10px; margin-top:14px;">
+      <button class="btn btn-ghost" id="btn-verify-code" style="margin-top:0;">Verify</button>
+      <button class="btn btn-ghost" id="btn-resend-code" style="margin-top:0;">Resend code</button>
+    </div>
+
+    <label class="checkline" style="margin-top:28px;">
+      <input type="checkbox" id="confirm-saved">
+      I've downloaded and safely stored my keystore file. I understand it cannot be recovered if lost.
+    </label>
+
+    <label class="checkline" id="confirm-seed-row">
+      <input type="checkbox" id="confirm-seed-saved">
+      I've written down my 24-word seed phrase on paper. I understand anyone who sees these words can access this wallet, with no password needed.
+    </label>
+
+    <button class="btn btn-primary" id="btn-continue-dash" disabled>Continue to wallet</button>
+  </div>
+
+  <!-- ========== DASHBOARD ========== -->
+  <div id="screen-dash" class="dash hidden">
+    <div class="panel full">
+      <div class="eyebrow">Your Address</div>
+      <div class="addr-row">
+        <div class="addr-value" id="dash-address">—</div>
+        <button class="copy-btn" id="btn-copy-address">Copy</button>
+      </div>
+      <div class="qr-wrap" id="qr-wrap"></div>
+    </div>
+
+    <div class="panel">
+      <div class="eyebrow"><span class="pulse-dot"></span>Balance</div>
+      <div><span class="balance-value" id="dash-balance">—</span><span class="balance-unit">QL</span></div>
+      <div class="balance-sub" id="dash-balance-sub">Fetching from node…</div>
+    </div>
+
+    <div class="panel">
+      <div class="eyebrow">Network</div>
+      <div style="font-size:13px; color:var(--text-dim); line-height:1.9;">
+        Chain height: <span id="dash-height" style="font-family:var(--mono); color:var(--text);">—</span><br>
+        Status: <span id="dash-status" style="font-family:var(--mono); color:var(--text);">—</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btn-lock" style="margin-top:16px;">Lock wallet</button>
+    </div>
+
+    <div class="panel full">
+      <div class="eyebrow">Send QL</div>
+      <label>Recipient address (hex)</label>
+      <input type="text" id="send-to" placeholder="Paste a Quantum-Lattice address">
+      <label>Amount</label>
+      <input type="number" id="send-amount" placeholder="0.00" min="0" step="0.00000001">
+      <button class="btn btn-primary" id="btn-send">Sign &amp; send</button>
+      <div class="send-status" id="send-status"></div>
+    </div>
+
+    <div class="panel full">
+      <div class="eyebrow">This Session's Activity</div>
+      <div id="activity-list"><div class="empty-note">Nothing sent yet this session. (Full transaction history requires a node feature not built yet.)</div></div>
+    </div>
+  </div>
+
+  <p style="margin-top:40px;"><a class="mut-link" href="https://quantum-lattice.futuristicai.co.za" target="_blank" rel="noopener">← Back to Quantum-Lattice Explorer</a></p>
+</div>
+
+<script type="module">
+// Real ML-DSA-65 cryptography running entirely in this browser tab via
+// WebAssembly — no local helper program required. This became possible
+// once the project moved to a pure-Rust crypto crate (ml-dsa); the earlier
+// pqcrypto-dilithium attempt couldn't compile to the browser's WASM target
+// because it relied on C code needing a standard library that target
+// doesn't have.
+import init, { generate_keypair, sign_message, validate_public_key, keypair_from_seed } from './pkg/ql_wallet_wasm.js';
+import { entropyToMnemonic, mnemonicToEntropy, validateMnemonic } from 'https://cdn.jsdelivr.net/npm/web-bip39/+esm';
+import bip39Wordlist from 'https://cdn.jsdelivr.net/npm/web-bip39/wordlists/english/+esm';
+
+let wasmReady = init();
+
+// Default the node address based on where this page itself is being
+// served from — real visitors (qlwallet.futuristicai.co.za) never need to
+// type anything in; local testing (127.0.0.1) keeps working exactly as
+// before. The wallet's static files and the node's actual API are two
+// different subdomains/origins, which is fine — every API endpoint already
+// has CORS enabled for exactly this.
+(function setDefaultNodeUrl() {
+  const host = window.location.hostname;
+  const isLocalPage = host === '127.0.0.1' || host === 'localhost' || host === '';
+  document.getElementById('node-url').value = isLocalPage ? '127.0.0.1:8034' : 'quantum-lattice.futuristicai.co.za';
+})();
+const DILITHIUM3_PUBKEY_LEN = null; // no longer assumed — validated via WASM instead
+
+function isValidAddress(bytes) {
+  return bytes && bytes.length > 0 && validate_public_key(bytes);
+}
+
+let secretKeyBytes = null;   // decrypted, in-memory ONLY, cleared on lock
+let publicKeyBytes = null;
+let currentAddress = null;
+
+const $ = (id) => document.getElementById(id);
+const nodeUrl = () => $('node-url').value.trim();
+
+// Local addresses (127.0.0.1, localhost, or a bare LAN IP like 10.x/192.168.x
+// while testing) are plain http — there's no TLS cert for "127.0.0.1".
+// Anything else is assumed to be a real public domain reached through
+// Cloudflare, which terminates TLS — so it must be fetched over https, or
+// the browser blocks the request outright as mixed content on this
+// https-served page.
+function apiBase() {
+  const url = nodeUrl();
+  const isLocal = /^(127\.0\.0\.1|localhost|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url);
+  return (isLocal ? 'http://' : 'https://') + url;
+}
+
+function hexEncode(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function hexDecode(hex) {
+  hex = hex.trim();
+  if (hex.length % 2 !== 0) throw new Error('Invalid hex length');
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+function concatBytes(...arrs) {
+  const total = arrs.reduce((n, a) => n + a.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrs) { out.set(a, offset); offset += a.length; }
+  return out;
+}
+function u64ToLEBytes(bigintVal) {
+  const out = new Uint8Array(8);
+  let v = bigintVal;
+  for (let i = 0; i < 8; i++) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+}
+
+// ---- Password-based encryption (Web Crypto API, native to the browser) ----
+async function deriveAesKey(password, saltBytes, iterations) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: saltBytes, iterations, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+const KDF_ITERATIONS = 300000;
+
+async function buildKeystore(publicKey, secretKey, password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveAesKey(password, salt, KDF_ITERATIONS);
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, secretKey);
+  return {
+    version: 1,
+    algorithm: 'dilithium3',
+    address: hexEncode(publicKey),
+    kdf: 'PBKDF2-SHA256',
+    kdf_iterations: KDF_ITERATIONS,
+    salt: hexEncode(salt),
+    iv: hexEncode(iv),
+    ciphertext: hexEncode(new Uint8Array(ciphertext)),
+  };
+}
+
+async function decryptKeystore(keystore, password) {
+  const salt = hexDecode(keystore.salt);
+  const iv = hexDecode(keystore.iv);
+  const ciphertext = hexDecode(keystore.ciphertext);
+  const key = await deriveAesKey(password, salt, keystore.kdf_iterations || KDF_ITERATIONS);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return new Uint8Array(plain);
+}
+
+// ---- Tabs ----
+document.querySelectorAll('.stage > .card > .tabs > .tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.stage > .card > .tabs > .tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const which = tab.dataset.tab;
+    $('tab-create').classList.toggle('hidden', which !== 'create');
+    $('tab-unlock').classList.toggle('hidden', which !== 'unlock');
+    $('tab-account').classList.toggle('hidden', which !== 'account');
+  });
+});
+
+// ---- Account sub-tabs (Register / Look up) ----
+document.querySelectorAll('[data-account-tab]').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('[data-account-tab]').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const which = tab.dataset.accountTab;
+    $('account-register').classList.toggle('hidden', which !== 'register');
+    $('account-lookup').classList.toggle('hidden', which !== 'lookup');
+  });
+});
+
+$('btn-register').addEventListener('click', async () => {
+  const err = $('account-error');
+  const ok = $('account-success');
+  err.style.display = 'none';
+  ok.style.display = 'none';
+
+  const name = $('reg-name').value.trim();
+  const email = $('reg-email').value.trim();
+  const address = $('reg-address').value.trim();
+
+  if (!email || !email.includes('@')) { err.textContent = 'Enter a valid email address.'; err.style.display = 'block'; return; }
+  if (!address) { err.textContent = 'Paste the wallet address to link.'; err.style.display = 'block'; return; }
+
+  $('btn-register').disabled = true;
+  $('btn-register').textContent = 'Registering…';
+
+  try {
+    const body = '{"email":"' + email.replace(/"/g, '\\"') + '","full_name":"' + name.replace(/"/g, '\\"') + '","address":"' + address + '"}';
+    const res = await fetch(apiBase() + '/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+    if (res.ok) {
+      ok.textContent = 'Registered — this email is now linked to that address.';
+      ok.style.display = 'block';
+    } else {
+      throw new Error(resJson.error || 'Registration failed.');
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Could not reach the node to register.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-register').disabled = false;
+    $('btn-register').textContent = 'Register';
+  }
+});
+
+$('btn-lookup').addEventListener('click', async () => {
+  const err = $('lookup-error');
+  const result = $('lookup-result');
+  err.style.display = 'none';
+  result.style.display = 'none';
+
+  const email = $('lookup-email').value.trim();
+  if (!email) { err.textContent = 'Enter an email to look up.'; err.style.display = 'block'; return; }
+
+  $('btn-lookup').disabled = true;
+  $('btn-lookup').textContent = 'Looking up…';
+
+  try {
+    const body = '{"email":"' + email.replace(/"/g, '\\"') + '"}';
+    const res = await fetch(apiBase() + '/api/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+    if (res.ok) {
+      result.textContent = 'Linked address: ' + resJson.address;
+      result.style.display = 'block';
+    } else {
+      throw new Error(resJson.error || 'No account found with this email.');
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Could not reach the node.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-lookup').disabled = false;
+    $('btn-lookup').textContent = 'Look up';
+  }
+});
+
+// ---- Password strength (rough, local-only heuristic) ----
+$('create-pw').addEventListener('input', () => {
+  const v = $('create-pw').value;
+  let score = 0;
+  if (v.length >= 10) score += 30;
+  if (v.length >= 16) score += 20;
+  if (/[A-Z]/.test(v)) score += 15;
+  if (/[0-9]/.test(v)) score += 15;
+  if (/[^A-Za-z0-9]/.test(v)) score += 20;
+  const bar = $('strength-bar');
+  bar.style.width = Math.min(score, 100) + '%';
+  bar.style.background = score < 40 ? 'var(--danger)' : score < 75 ? 'var(--warn)' : 'var(--success)';
+});
+
+// ---- Create wallet ----
+let pendingKeystore = null;
+let pendingVerifyEmail = null;
+
+$('btn-generate').addEventListener('click', async () => {
+  const name = $('create-name').value.trim();
+  const email = $('create-email').value.trim();
+  const pw = $('create-pw').value;
+  const pw2 = $('create-pw2').value;
+  const err = $('create-error');
+  err.style.display = 'none';
+
+  if (!email || !email.includes('@')) { err.textContent = 'Enter a valid email address.'; err.style.display = 'block'; return; }
+  if (pw.length < 10) { err.textContent = 'Password must be at least 10 characters.'; err.style.display = 'block'; return; }
+  if (pw !== pw2) { err.textContent = 'Passwords do not match.'; err.style.display = 'block'; return; }
+
+  $('btn-generate').disabled = true;
+  $('btn-generate').textContent = 'Generating keys…';
+
+  let kp;
+  try {
+    await wasmReady;
+    kp = generate_keypair();
+  } catch (e) {
+    err.textContent = 'Could not generate keys in this browser: ' + (e.message || e);
+    err.style.display = 'block';
+    $('btn-generate').disabled = false;
+    $('btn-generate').textContent = 'Generate wallet';
+    return;
+  }
+  const pub = new Uint8Array(kp.public_key);
+  const sec = new Uint8Array(kp.secret_key);
+  const addressHex = hexEncode(pub);
+
+  pendingKeystore = await buildKeystore(pub, sec, pw);
+  publicKeyBytes = pub;
+  secretKeyBytes = sec;
+
+  // Record the email + address (and name, if given) for admin visibility.
+  // This never touches the actual keys — a failure here must not block
+  // wallet creation, since the wallet itself is already fully created and
+  // usable regardless of whether this record succeeds.
+  try {
+    const body = '{"email":"' + email.replace(/"/g, '\\"') + '","full_name":"' + name.replace(/"/g, '\\"') + '","address":"' + addressHex + '"}';
+    await fetch(apiBase() + '/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    pendingVerifyEmail = email;
+  } catch (e) {
+    // Silent — the wallet is still fully valid even if this record failed
+    // (e.g. node unreachable, or this email already used for another wallet).
+  }
+
+  $('verify-code').value = '';
+  $('verify-error').style.display = 'none';
+  $('verify-success').style.display = 'none';
+
+  $('keystore-preview').textContent = JSON.stringify(pendingKeystore, null, 2).slice(0, 400) + '…';
+  await renderSeedPhrase(sec);
+  $('screen-auth').classList.add('hidden');
+  $('screen-backup').classList.remove('hidden');
+
+  $('btn-generate').disabled = false;
+  $('btn-generate').textContent = 'Generate wallet';
+});
+
+let seedPhraseAvailable = false;
+
+async function renderSeedPhrase(seedBytes) {
+  const grid = $('seed-phrase-grid');
+  const hexBox = $('seed-hex-value');
+  const seedCheckRow = $('confirm-seed-row');
+  hexBox.textContent = hexEncode(seedBytes);
+
+  try {
+    const mnemonic = await entropyToMnemonic(seedBytes, bip39Wordlist);
+    const words = mnemonic.trim().split(/\s+/);
+    grid.innerHTML = words.map((w, i) => '<span style="color: var(--text-faint);">' + (i + 1) + '.</span> ' + w).join('');
+    seedPhraseAvailable = true;
+    seedCheckRow.classList.remove('hidden');
+  } catch (e) {
+    // Non-critical: the keystore file above is still fully valid and
+    // sufficient on its own. Just hide the seed-phrase confirmation
+    // requirement rather than blocking wallet creation over it.
+    grid.innerHTML = '<span style="color: var(--text-faint);">Seed phrase unavailable in this browser session — your keystore file above is still fully valid on its own.</span>';
+    seedPhraseAvailable = false;
+    seedCheckRow.classList.add('hidden');
+  }
+  updateContinueButton();
+}
+
+function updateContinueButton() {
+  const keystoreOk = $('confirm-saved').checked;
+  const seedOk = !seedPhraseAvailable || $('confirm-seed-saved').checked;
+  $('btn-continue-dash').disabled = !(keystoreOk && seedOk);
+}
+
+$('btn-download-keystore').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(pendingKeystore, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ql-wallet-' + pendingKeystore.address.slice(0, 10) + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  try { localStorage.setItem('ql_wallet_keystore', JSON.stringify(pendingKeystore)); } catch (e) {}
+});
+
+$('confirm-saved').addEventListener('change', updateContinueButton);
+$('confirm-seed-saved').addEventListener('change', updateContinueButton);
+
+$('btn-verify-code').addEventListener('click', async () => {
+  const err = $('verify-error');
+  const ok = $('verify-success');
+  err.style.display = 'none';
+  ok.style.display = 'none';
+
+  const code = $('verify-code').value.trim();
+  if (!pendingVerifyEmail) { err.textContent = 'No email is pending verification.'; err.style.display = 'block'; return; }
+  if (!/^\d{6}$/.test(code)) { err.textContent = 'Enter the 6-digit code from your email.'; err.style.display = 'block'; return; }
+
+  $('btn-verify-code').disabled = true;
+  try {
+    const body = '{"email":"' + pendingVerifyEmail.replace(/"/g, '\\"') + '","code":"' + code + '"}';
+    const res = await fetch(apiBase() + '/api/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+    if (res.ok) {
+      ok.textContent = 'Verified!';
+      ok.style.display = 'block';
+    } else {
+      throw new Error(resJson.error || 'Verification failed.');
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Could not verify — try again.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-verify-code').disabled = false;
+  }
+});
+
+$('btn-resend-code').addEventListener('click', async () => {
+  const err = $('verify-error');
+  const ok = $('verify-success');
+  err.style.display = 'none';
+  ok.style.display = 'none';
+
+  if (!pendingVerifyEmail) { err.textContent = 'No email is pending verification.'; err.style.display = 'block'; return; }
+
+  $('btn-resend-code').disabled = true;
+  $('btn-resend-code').textContent = 'Sending…';
+  try {
+    const body = '{"email":"' + pendingVerifyEmail.replace(/"/g, '\\"') + '"}';
+    const res = await fetch(apiBase() + '/api/resend-verification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+    if (res.ok) {
+      ok.textContent = 'A new code has been sent.';
+      ok.style.display = 'block';
+    } else {
+      throw new Error(resJson.error || 'Could not resend code.');
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Could not resend — try again.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-resend-code').disabled = false;
+    $('btn-resend-code').textContent = 'Resend code';
+  }
+});
+
+$('btn-continue-dash').addEventListener('click', () => {
+  currentAddress = hexEncode(publicKeyBytes);
+  $('screen-backup').classList.add('hidden');
+  enterDashboard();
+});
+
+// ---- Unlock wallet ----
+$('link-show-restore').addEventListener('click', (e) => {
+  e.preventDefault();
+  $('tab-unlock').classList.add('hidden');
+  $('tab-restore').classList.remove('hidden');
+});
+
+$('link-show-unlock').addEventListener('click', (e) => {
+  e.preventDefault();
+  $('tab-restore').classList.add('hidden');
+  $('tab-unlock').classList.remove('hidden');
+});
+
+$('btn-restore').addEventListener('click', async () => {
+  const err = $('restore-error');
+  err.style.display = 'none';
+
+  const phrase = $('restore-phrase').value.trim().replace(/\s+/g, ' ');
+  const pw = $('restore-pw').value;
+  const pw2 = $('restore-pw2').value;
+
+  if (phrase.split(' ').length !== 24) { err.textContent = 'Enter all 24 words, separated by spaces.'; err.style.display = 'block'; return; }
+  if (pw.length < 10) { err.textContent = 'Password must be at least 10 characters.'; err.style.display = 'block'; return; }
+  if (pw !== pw2) { err.textContent = 'Passwords do not match.'; err.style.display = 'block'; return; }
+
+  $('btn-restore').disabled = true;
+  $('btn-restore').textContent = 'Restoring…';
+
+  try {
+    const valid = await validateMnemonic(phrase, bip39Wordlist);
+    if (!valid) throw new Error('This seed phrase does not look valid — check the words and their order.');
+
+    const seedBytes = await mnemonicToEntropy(phrase, bip39Wordlist);
+
+    await wasmReady;
+    const kp = keypair_from_seed(new Uint8Array(seedBytes));
+    const pub = new Uint8Array(kp.public_key);
+    const sec = new Uint8Array(kp.secret_key);
+
+    pendingKeystore = await buildKeystore(pub, sec, pw);
+    publicKeyBytes = pub;
+    secretKeyBytes = sec;
+
+    $('keystore-preview').textContent = JSON.stringify(pendingKeystore, null, 2).slice(0, 400) + '…';
+    await renderSeedPhrase(sec);
+    $('screen-auth').classList.add('hidden');
+    $('screen-backup').classList.remove('hidden');
+
+    $('restore-phrase').value = '';
+    $('restore-pw').value = '';
+    $('restore-pw2').value = '';
+  } catch (e) {
+    err.textContent = e.message || 'Could not restore from this seed phrase.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-restore').disabled = false;
+    $('btn-restore').textContent = 'Restore wallet';
+  }
+});
+
+$('keystore-file').addEventListener('change', () => {
+  const f = $('keystore-file').files[0];
+  $('keystore-file-info').textContent = f ? ('Selected: ' + f.name) : 'No file selected — will check this browser\'s local storage instead.';
+});
+
+$('btn-unlock').addEventListener('click', async () => {
+  const err = $('unlock-error');
+  err.style.display = 'none';
+  const pw = $('unlock-pw').value;
+
+  let keystore;
+  const file = $('keystore-file').files[0];
+  try {
+    if (file) {
+      const text = await file.text();
+      keystore = JSON.parse(text);
+    } else {
+      const stored = localStorage.getItem('ql_wallet_keystore');
+      if (!stored) throw new Error('No keystore file selected and none found in this browser.');
+      keystore = JSON.parse(stored);
+    }
+
+    const sec = await decryptKeystore(keystore, pw);
+    const pub = hexDecode(keystore.address);
+
+    await wasmReady;
+    if (!isValidAddress(pub)) throw new Error('Keystore address is not a valid Dilithium3 public key.');
+
+    secretKeyBytes = sec;
+    publicKeyBytes = pub;
+    currentAddress = keystore.address;
+    enterDashboard();
+  } catch (e) {
+    err.textContent = 'Could not unlock — check your password and keystore file.';
+    err.style.display = 'block';
+  }
+});
+
+// ---- Dashboard ----
+let pollTimer = null;
+
+function enterDashboard() {
+  $('screen-auth').classList.add('hidden');
+  $('screen-backup').classList.add('hidden');
+  $('screen-dash').classList.remove('hidden');
+  $('dash-address').textContent = currentAddress;
+  document.body.classList.add('unlocked-flash');
+  setTimeout(() => document.body.classList.remove('unlocked-flash'), 1500);
+
+  try {
+    $('qr-wrap').innerHTML = '';
+    new QRCode($('qr-wrap'), { text: currentAddress, width: 128, height: 128, colorDark: '#0d0e1a', colorLight: '#ffffff' });
+  } catch (e) {
+    // This QR library can't handle a string this long (ML-DSA-65 addresses
+    // are ~3900 hex characters — far past what it was built for). Not
+    // critical: the address is already shown as text above, so just hide
+    // the QR panel instead of blocking the rest of the dashboard.
+    $('qr-wrap').style.display = 'none';
+  }
+
+  refreshChainData();
+  pollTimer = setInterval(refreshChainData, 6000);
+}
+
+async function refreshChainData() {
+  try {
+    const balRes = await fetch(apiBase() + '/api/balance?address=' + currentAddress);
+    const bal = await balRes.json();
+    $('dash-balance').textContent = Number(bal.balance_ql).toLocaleString();
+    $('dash-balance-sub').textContent = 'Live from node · updates every 6s';
+
+    const jsonRes = await fetch(apiBase() + '/api/json');
+    const info = await jsonRes.json();
+    $('dash-height').textContent = info.chain_height;
+    $('dash-status').textContent = info.status;
+  } catch (e) {
+    $('dash-balance-sub').textContent = 'Could not reach node — check the NODE address above.';
+    $('dash-status').textContent = 'unreachable';
+  }
+}
+
+$('btn-copy-address').addEventListener('click', () => {
+  navigator.clipboard.writeText(currentAddress);
+  $('btn-copy-address').textContent = 'Copied!';
+  setTimeout(() => $('btn-copy-address').textContent = 'Copy', 1500);
+});
+
+$('btn-lock').addEventListener('click', () => {
+  secretKeyBytes = null;
+  publicKeyBytes = null;
+  currentAddress = null;
+  clearInterval(pollTimer);
+  $('screen-dash').classList.add('hidden');
+  $('screen-auth').classList.remove('hidden');
+  $('unlock-pw').value = '';
+});
+
+$('btn-send').addEventListener('click', async () => {
+  const status = $('send-status');
+  status.className = 'send-status pending';
+  status.textContent = 'Signing transaction…';
+
+  try {
+    const toHex = $('send-to').value.trim();
+    const amountStr = $('send-amount').value.trim();
+    if (!toHex || !amountStr) throw new Error('Enter a recipient and amount.');
+
+    const receiverBytes = hexDecode(toHex);
+    await wasmReady;
+    if (!isValidAddress(receiverBytes)) throw new Error('Recipient address is not a valid Dilithium3 public key.');
+
+    const amountQL = parseFloat(amountStr);
+    if (isNaN(amountQL) || amountQL <= 0) throw new Error('Enter a valid amount greater than 0.');
+    // Total supply (25.5M * 1e8 = 2.55e15) is well under Number.MAX_SAFE_INTEGER
+    // (~9.007e15), so a plain Number is safe here — BigInt is only used
+    // internally below for correct little-endian byte extraction.
+    const amountSmallest = Math.round(amountQL * 100000000);
+
+    const amountBytes = u64ToLEBytes(BigInt(amountSmallest));
+    const message = concatBytes(publicKeyBytes, receiverBytes, amountBytes);
+
+    let signature;
+    try {
+      signature = sign_message(secretKeyBytes, message);
+    } catch (e) {
+      throw new Error(e.message || 'Could not sign this transaction.');
+    }
+
+    status.textContent = 'Broadcasting to node…';
+
+    // Built manually (not JSON.stringify) so amount is emitted as a raw
+    // unquoted number — the node's hand-rolled parser (extract_json_number
+    // in network.rs) expects exactly that, not a quoted string.
+    const body = '{"sender":"' + hexEncode(publicKeyBytes) + '","receiver":"' + hexEncode(receiverBytes) + '","amount":' + amountSmallest + ',"signature":"' + hexEncode(new Uint8Array(signature)) + '"}';
+
+    const res = await fetch(apiBase() + '/api/submit_tx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+
+    // The node's error responses are plain text, not JSON — parse
+    // defensively so a 400 doesn't throw an unrelated "invalid JSON" error.
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { note: rawText, error: rawText }; }
+
+    if (res.ok) {
+      status.className = 'send-status ok';
+      status.textContent = 'Queued — ' + (resJson.note || 'will be verified and included when a miner produces the next block.');
+      addActivity(amountQL, toHex);
+      $('send-to').value = '';
+      $('send-amount').value = '';
+    } else {
+      throw new Error(resJson.error || resJson.note || 'Node rejected the transaction.');
+    }
+  } catch (e) {
+    status.className = 'send-status fail';
+    status.textContent = e.message || 'Something went wrong sending this transaction.';
+  }
+});
+
+function addActivity(amount, to) {
+  const list = $('activity-list');
+  if (list.querySelector('.empty-note')) list.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'activity-item';
+  row.innerHTML = '<span class="label">Sent to ' + to.slice(0, 14) + '…</span><span class="val">-' + amount + ' QL</span>';
+  list.prepend(row);
+}
+</script>
+</body>
+</html>
