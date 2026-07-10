@@ -10,7 +10,7 @@ Built by [Futuristic AI](https://futuristicai.co.za), Durban, South Africa.
 ## What's Here
 
 - src/ — the node itself: consensus, P2P gossip and catch-up sync, proof-of-work mining endpoint, difficulty retargeting, RocksDB-backed ledger
-- src/bin/miner.rs — a standalone mining client bundled with the node
+- ql-miner/ — the mining client, deliberately kept as its own separate, minimal project (no RocksDB, no C toolchain needed) — see below
 - ql-wallet-wasm/ — the WebAssembly signing core used by the browser wallet (pure Rust — no C toolchain required to build)
 - wallet.html, public_explorer.html, admin_dashboard.html — the front-end pages served directly by the node
 
@@ -34,7 +34,17 @@ cargo build --release
 
 RocksDB is compiled from source as part of the build — on Linux this typically works with no extra setup; on Windows, MSVC Build Tools (Desktop development with C++) are required.
 
-The standalone miner has no RocksDB dependency and can be built as its own lightweight project — see src/bin/miner.rs.
+## Mining
+
+The mining client lives in ql-miner/, entirely separate from the node's own dependencies:
+
+bash
+cd ql-miner
+cargo build --release
+./target/release/miner NODE_ADDRESS:PORT YOUR_WALLET_ADDRESS_HEX
+
+
+It connects over plain HTTP to a local address (127.0.0.1, a bare LAN IP, or localhost) for local testing, and over real HTTPS (via rustls, a pure-Rust TLS stack — no OpenSSL, no C toolchain needed) to any real public domain, connecting on port 443 regardless of what port is typed alongside it.
 
 ## Running
 
@@ -50,4 +60,4 @@ Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
 
 ## Security
 
-This codebase has gone through careful, methodical internal review — consensus and transaction validation, cryptographic signing, vault encryption, network input handling, and abuse protection — with issues found and fixed before release. See the live explorer's Security & Transparency tab for details and reproducible test vectors. This has not yet undergone independent third-party audit.
+This codebase has gone through careful, methodical internal review — consensus and transaction validation, cryptographic signing, vault encryption, network input handling, and abuse protection — with issues found and fixed before release. See the live explorer's Security & Transparency tab for details and reproducible test vectors.
