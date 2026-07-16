@@ -56,11 +56,27 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
     let node_mode = if args.len() > 1 { &args[1] } else { "node1" };
 
-    let (p2p_port, rpc_port, admin_port, db_path, key_prefix, peers) = if node_mode == "node2" {
+    let (p2p_port, rpc_port, admin_port, db_path, key_prefix, mut peers) = if node_mode == "node2" {
         (9033, 9034, 19034, "./ql_db_node2", "operational_vault_b", vec!["127.0.0.1:8033".to_string()])
     } else {
         (8033, 8034, 18034, "./ql_db_node1", "master_vault_a", vec!["127.0.0.1:9033".to_string()])
     };
+
+    // Optional, purely additive: real external peers (e.g. someone else's
+    // independently-run node) can be added without touching the hardcoded
+    // defaults above at all, via a comma-separated env var:
+    //   QL_EXTRA_PEERS=203.0.113.5:8033,198.51.100.9:8033
+    // Existing behavior (node1 <-> node2 on localhost) is completely
+    // unaffected either way.
+    if let Ok(extra) = std::env::var("QL_EXTRA_PEERS") {
+        for p in extra.split(',') {
+            let p = p.trim();
+            if !p.is_empty() {
+                println!("[CONFIG] Adding external peer from QL_EXTRA_PEERS: {}", p);
+                peers.push(p.to_string());
+            }
+        }
+    }
 
     println!(
         "[CONFIG] Active profile: {} | DB: {} | Admin(loopback): {}",
