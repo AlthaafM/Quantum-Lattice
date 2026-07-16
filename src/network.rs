@@ -146,6 +146,20 @@ impl P2PNode {
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
+
+        // Without this cap, a malicious or malformed peer could claim an
+        // enormous length and force this node to attempt a huge memory
+        // allocation before ever validating anything about the actual
+        // content. 16 MB is generous for any real block this network would
+        // ever produce, and tiny compared to a genuine attack attempt.
+        const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+        if len > MAX_FRAME_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "claimed frame size exceeds the maximum allowed",
+            ));
+        }
+
         let mut buf = vec![0u8; len];
         stream.read_exact(&mut buf).await?;
         Ok(buf)
@@ -329,7 +343,18 @@ impl P2PNode {
                     let db_clone = db.clone();
                     let peers_clone = peers.clone();
                     tokio::spawn(async move {
-                        if let Ok(payload) = Self::read_framed(&mut socket).await {
+                        // Without this, a peer that opens a connection and
+                        // never sends anything (or sends data too slowly)
+                        // ties up this task indefinitely — the same
+                        // slow-loris concern already fixed on the RPC and
+                        // admin servers, now matters here too since this
+                        // port is about to be reachable by real, untrusted
+                        // strangers for the first time.
+                        let read_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            Self::read_framed(&mut socket),
+                        ).await;
+                        if let Ok(Ok(payload)) = read_result {
                             if let Ok(msg) = deserialize::<P2PMessage>(&payload) {
                                 match msg {
                                     P2PMessage::NewBlock(block) => {
