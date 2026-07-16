@@ -211,16 +211,21 @@ fn meets_difficulty(hash: &[u8], required_bits: u32) -> bool {
 fn print_usage_and_exit() -> ! {
     eprintln!("=== QUANTUM-LATTICE (QL) MINING CLIENT ===");
     eprintln!();
-    eprintln!("Usage: miner NODE_ADDRESS:PORT YOUR_WALLET_ADDRESS_HEX");
+    eprintln!("Usage: miner NODE_ADDRESS:PORT YOUR_WALLET_ADDRESS_HEX [THREAD_COUNT]");
     eprintln!();
     eprintln!("  NODE_ADDRESS:PORT       The QL node to mine against, e.g. 127.0.0.1:8034");
     eprintln!("  YOUR_WALLET_ADDRESS_HEX Your own QL Wallet address (get this from the wallet's");
     eprintln!("                          dashboard) — this is where mining rewards are paid.");
+    eprintln!("  THREAD_COUNT            Optional. Number of CPU threads to use for mining.");
+    eprintln!("                          Defaults to every core available on this machine.");
     eprintln!();
     eprintln!("Example:");
     eprintln!("  miner quantum-lattice.futuristicai.co.za:8034 b8bd5b6d7983d328...5673");
+    eprintln!("  miner quantum-lattice.futuristicai.co.za:8034 b8bd5b6d7983d328...5673 8");
     std::process::exit(1);
 }
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -245,9 +250,22 @@ fn main() {
         print_usage_and_exit();
     }
 
+    // Optional 3rd argument to override the thread count — otherwise uses
+    // every logical CPU core available. Previously this only ever used a
+    // single core regardless of hardware, which left most of a many-core
+    // machine's real capacity unused.
+    let num_threads: usize = args
+        .get(3)
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+
     println!("=== QUANTUM-LATTICE (QL) MINING CLIENT ===");
     println!("[CONFIG] Connecting to node: {}", node_address);
     println!("[MINER] Mining rewards will be paid to: {}", hex::encode(&miner_pk));
+    println!("[MINER] Using {} CPU thread(s) for mining.", num_threads);
+
+    let miner_pk = Arc::new(miner_pk);
 
     loop {
         let fetch_start = now();
@@ -275,8 +293,8 @@ fn main() {
         };
         let difficulty = extract_json_number(body, "difficulty_bits").unwrap_or(20) as u32;
 
-        let prev_hash = hex::decode(&prev_hash_hex).unwrap_or_default();
-        let merkle_root = hex::decode(&merkle_root_hex).unwrap_or_default();
+        let prev_hash = Arc::new(hex::decode(&prev_hash_hex).unwrap_or_default());
+        let merkle_root = Arc::new(hex::decode(&merkle_root_hex).unwrap_or_default());
 
         println!(
             "[{}] [MINER] Got template for block {} (fetch started {}) — mining at {} leading zero bit(s)...",
@@ -284,33 +302,70 @@ fn main() {
         );
 
         let hash_start = now();
-        let mut start_nonce_bytes = [0u8; 8];
-        getrandom::fill(&mut start_nonce_bytes).expect("OS randomness unavailable");
-        let mut nonce: u64 = u64::from_le_bytes(start_nonce_bytes);
-        let batch_start_nonce = nonce;
-        let mut tried: u64 = 0;
-        let mut found = false;
-        loop {
-            let hash = calculate_pow_hash(1, &prev_hash, &merkle_root, block_height, &miner_pk, nonce);
-            if meets_difficulty(&hash, difficulty) {
-                found = true;
-                break;
-            }
-            nonce = nonce.wrapping_add(1);
-            tried += 1;
-            // Periodically bail out and refetch the template in case someone
-            // else (or our own test tx cycle) already produced this block —
-            // otherwise we could grind forever on a stale target. Each batch
-            // starts from a fresh random nonce (see above) so a refetch
-            // actually explores new search space instead of re-checking the
-            // exact same doomed range every time.
-            if tried % 2_000_000 == 0 {
-                break;
-            }
+        let found_flag = Arc::new(AtomicBool::new(false));
+        let winning_nonce = Arc::new(AtomicU64::new(0));
+        let total_tried = Arc::new(AtomicU64::new(0));
+
+        // Each thread mines independently from its own random starting
+        // point. With a 64-bit nonce space, the chance of two threads ever
+        // meaningfully overlapping is negligible — no need to explicitly
+        // partition the range.
+        let mut handles = Vec::with_capacity(num_threads);
+        for _ in 0..num_threads {
+            let found_flag = found_flag.clone();
+            let winning_nonce = winning_nonce.clone();
+            let total_tried = total_tried.clone();
+            let prev_hash = prev_hash.clone();
+            let merkle_root = merkle_root.clone();
+            let miner_pk = miner_pk.clone();
+
+            let handle = thread::spawn(move || {
+                let mut start_nonce_bytes = [0u8; 8];
+                if getrandom::fill(&mut start_nonce_bytes).is_err() {
+                    return;
+                }
+                let mut nonce: u64 = u64::from_le_bytes(start_nonce_bytes);
+                let mut local_tried: u64 = 0;
+
+                loop {
+                    // Checked once per iteration — cheap relative to the hash
+                    // itself, and lets every thread stop promptly once any
+                    // one of them finds a valid nonce, instead of each
+                    // grinding through its own full batch regardless.
+                    if found_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let hash = calculate_pow_hash(1, &prev_hash, &merkle_root, block_height, &miner_pk, nonce);
+                    if meets_difficulty(&hash, difficulty) {
+                        winning_nonce.store(nonce, Ordering::SeqCst);
+                        found_flag.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    nonce = nonce.wrapping_add(1);
+                    local_tried += 1;
+                    // Same per-thread batch limit as before, per-thread — so
+                    // total work per round scales naturally with core count
+                    // rather than staying fixed regardless of hardware.
+                    if local_tried % 2_000_000 == 0 {
+                        break;
+                    }
+                }
+                total_tried.fetch_add(local_tried, Ordering::Relaxed);
+            });
+            handles.push(handle);
         }
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        let tried = total_tried.load(Ordering::Relaxed);
+        let found = found_flag.load(Ordering::Relaxed);
+        let nonce = winning_nonce.load(Ordering::SeqCst);
+
         println!(
-            "[{}] [MINER] Batch of {} nonces finished (started {}, from nonce {}) — {}",
-            now(), tried, hash_start, batch_start_nonce, if found { "FOUND" } else { "no match, refetching" }
+            "[{}] [MINER] Batch of {} nonces finished across {} thread(s) (started {}) — {}",
+            now(), tried, num_threads, hash_start, if found { "FOUND" } else { "no match, refetching" }
         );
 
         if !found {
@@ -319,7 +374,7 @@ fn main() {
 
         let submit_body = format!(
             "{{\"miner\":\"{}\",\"nonce\":{}}}",
-            hex::encode(&miner_pk),
+            hex::encode(miner_pk.as_ref()),
             nonce
         );
         match http_post(&node_address, "/api/mining/submit", &submit_body) {
