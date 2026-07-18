@@ -3,6 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::error::Error;
 use std::fs;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 use serde::{Serialize, Deserialize};
 use bincode::{serialize, deserialize};
@@ -13,6 +14,13 @@ use crate::users;
 use crate::email;
 use crate::ratelimit::RateLimiter;
 use crate::wallet::sign_with_seed_bytes;
+
+/// Tracks the last time we successfully received ANY message from a given
+/// peer IP over the P2P port — real, direct evidence of who's genuinely
+/// connecting and participating, independent of whatever's in our own
+/// configured peer list (which only reflects peers WE reach out to, not
+/// who reaches out to us).
+pub type PeerActivity = Arc<Mutex<HashMap<String, i64>>>;
 
 #[derive(Serialize, Deserialize)]
 pub enum P2PMessage {
@@ -50,9 +58,6 @@ fn extract_json_string(body: &str, key: &str) -> Option<String> {
     let after_colon = after_key[colon_pos + 1..].trim_start();
     let value_start = after_colon.strip_prefix('"')?;
 
-    // Scan char-by-char rather than searching for the next " directly —
-    // a value containing an escaped quote (\") would otherwise get cut
-    // short at that point instead of continuing to the real closing quote.
     let mut result = String::new();
     let mut chars = value_start.chars();
     while let Some(c) = chars.next() {
@@ -121,13 +126,9 @@ async fn read_http_request(socket: &mut TcpStream) -> String {
         data
     };
 
-    // Without this, a connection that opens and then sends data one byte
-    // at a time (or never finishes) ties up this handler indefinitely —
-    // a classic slow-loris denial-of-service angle against a hand-rolled
-    // server with no other timeout protection.
     match tokio::time::timeout(std::time::Duration::from_secs(15), read_future).await {
         Ok(data) => String::from_utf8_lossy(&data).to_string(),
-        Err(_) => String::new(), // timed out — treated identically to an empty/closed connection, which every call site already handles
+        Err(_) => String::new(),
     }
 }
 
@@ -147,11 +148,6 @@ impl P2PNode {
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        // Without this cap, a malicious or malformed peer could claim an
-        // enormous length and force this node to attempt a huge memory
-        // allocation before ever validating anything about the actual
-        // content. 16 MB is generous for any real block this network would
-        // ever produce, and tiny compared to a genuine attack attempt.
         const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
         if len > MAX_FRAME_SIZE {
             return Err(std::io::Error::new(
@@ -182,10 +178,20 @@ impl P2PNode {
     }
 
     async fn request_height(peer: &str) -> Option<u64> {
-        let mut stream = TcpStream::connect(peer).await.ok()?;
+        // Without a timeout here, a single connection attempt that hangs
+        // (rather than cleanly succeeding or failing) would permanently
+        // freeze the periodic catch-up loop — it would never proceed to
+        // sleep and retry, since it's stuck awaiting this one call forever.
+        let mut stream = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpStream::connect(peer),
+        ).await.ok()?.ok()?;
         let payload = serialize(&P2PMessage::RequestHeight).ok()?;
         Self::write_framed(&mut stream, &payload).await.ok()?;
-        let response_bytes = Self::read_framed(&mut stream).await.ok()?;
+        let response_bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Self::read_framed(&mut stream),
+        ).await.ok()?.ok()?;
         match deserialize::<P2PMessage>(&response_bytes).ok()? {
             P2PMessage::HeightResponse(h) => Some(h),
             _ => None,
@@ -193,10 +199,16 @@ impl P2PNode {
     }
 
     async fn request_blocks(peer: &str, from_height: u64) -> Option<Vec<Block>> {
-        let mut stream = TcpStream::connect(peer).await.ok()?;
+        let mut stream = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpStream::connect(peer),
+        ).await.ok()?.ok()?;
         let payload = serialize(&P2PMessage::RequestBlocks(from_height)).ok()?;
         Self::write_framed(&mut stream, &payload).await.ok()?;
-        let response_bytes = Self::read_framed(&mut stream).await.ok()?;
+        let response_bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            Self::read_framed(&mut stream),
+        ).await.ok()?.ok()?;
         match deserialize::<P2PMessage>(&response_bytes).ok()? {
             P2PMessage::BlocksResponse(blocks) => Some(blocks),
             _ => None,
@@ -254,10 +266,6 @@ impl P2PNode {
             return false;
         }
 
-        // The block itself must represent real, verified proof-of-work —
-        // gossiped/caught-up blocks aren't exempt just because a peer sent
-        // them. Uses the CURRENT persisted difficulty, not whatever the
-        // sender might claim.
         if !meets_difficulty(&block.header.calculate_pow_hash(), eng.state.difficulty_bits) {
             println!("[REJECTED] Block {} does not meet the difficulty target.", block.header.block_height);
             return false;
@@ -272,19 +280,6 @@ impl P2PNode {
 
         eng.process_block_reward(block.header.miner.clone());
 
-        // Deterministic retargeting — MUST run on every path that advances
-        // the chain (this covers both gossip and catch-up), using only data
-        // already agreed upon (block timestamps), so every node computes the
-        // exact same new difficulty.
-        //
-        // first_height > 0 guard: block 0 (genesis) has a deliberately FAKE
-        // fixed timestamp (needed so every node's genesis hash matches
-        // byte-for-byte — see the earlier "chains have diverged" fix). If the
-        // very first retarget window (blocks 1-10) reaches back to genesis,
-        // it measures against that fake timestamp instead of real wall-clock
-        // time, producing nonsense results. So the first window is skipped
-        // entirely; real retargeting starts at block 20 using only genuine
-        // mined-block timestamps.
         if eng.state.chain_height % RETARGET_INTERVAL == 0 {
             let first_height = eng.state.chain_height - RETARGET_INTERVAL;
             if first_height > 0 {
@@ -331,6 +326,7 @@ impl P2PNode {
         engine: Arc<Mutex<ConsensusEngine>>,
         db: Arc<DB>,
         peers: Vec<String>,
+        peer_activity: PeerActivity,
     ) -> Result<(), Box<dyn Error>> {
         let address = format!("0.0.0.0:{}", self.p2p_port);
         let listener = TcpListener::bind(&address).await?;
@@ -338,24 +334,27 @@ impl P2PNode {
 
         tokio::spawn(async move {
             loop {
-                if let Ok((mut socket, _)) = listener.accept().await {
+                if let Ok((mut socket, remote_addr)) = listener.accept().await {
                     let engine_clone = engine.clone();
                     let db_clone = db.clone();
                     let peers_clone = peers.clone();
+                    let peer_activity_clone = peer_activity.clone();
+                    let peer_ip = remote_addr.ip().to_string();
                     tokio::spawn(async move {
-                        // Without this, a peer that opens a connection and
-                        // never sends anything (or sends data too slowly)
-                        // ties up this task indefinitely — the same
-                        // slow-loris concern already fixed on the RPC and
-                        // admin servers, now matters here too since this
-                        // port is about to be reachable by real, untrusted
-                        // strangers for the first time.
                         let read_result = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             Self::read_framed(&mut socket),
                         ).await;
                         if let Ok(Ok(payload)) = read_result {
                             if let Ok(msg) = deserialize::<P2PMessage>(&payload) {
+                                // Real, direct evidence of who's genuinely connecting
+                                // and participating — independent of whatever's in
+                                // our own configured peer list, which only reflects
+                                // who WE reach out to, not who reaches out to us.
+                                {
+                                    let mut activity = peer_activity_clone.lock().await;
+                                    activity.insert(peer_ip.clone(), chrono::Utc::now().timestamp());
+                                }
                                 match msg {
                                     P2PMessage::NewBlock(block) => {
                                         Self::handle_incoming_block(block, engine_clone, db_clone, peers_clone).await;
@@ -391,11 +390,6 @@ impl P2PNode {
         Ok(())
     }
 
-    /// PUBLIC-FACING socket. Explorer, live /api/json, balance lookups, real
-    /// transaction submission, and now real mining (template + submit).
-    /// Blocks are ONLY ever produced through a successful /api/mining/submit
-    /// — the old "auto-mine every 30s" loop and the debug force_tx endpoint
-    /// are both gone.
     pub async fn start_rpc_server(
         &self,
         db_path: String,
@@ -426,13 +420,6 @@ impl P2PNode {
                         }
                         let first_line = request_str.lines().next().unwrap_or("");
 
-                        // CORS preflight: browsers send this automatically before any
-                        // POST with a JSON body (submit_tx, mining/submit) when the
-                        // page making the request is on a different origin than this
-                        // node (which the wallet always will be — different port at
-                        // minimum). Without answering this, the browser blocks the
-                        // real request before it's ever sent, regardless of what the
-                        // real endpoint's own headers say.
                         if first_line.starts_with("OPTIONS") {
                             let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n";
                             let _ = socket.write_all(resp.as_bytes()).await;
@@ -572,10 +559,6 @@ impl P2PNode {
                                 (Some(email), Some(address)) => {
                                     match users::register_user(&db_clone, &email, full_name.as_deref(), &address) {
                                         Ok(()) => {
-                                            // Fire off the verification email in the background —
-                                            // registration itself already succeeded regardless of
-                                            // whether this email send works, so we never block or
-                                            // fail the response on it.
                                             let db_for_email = db_clone.clone();
                                             let email_for_send = email.clone();
                                             tokio::spawn(async move {
@@ -612,9 +595,6 @@ impl P2PNode {
 
                             let response = match (email, code) {
                                 (Some(email), Some(code)) => {
-                                    // A 6-digit code has only 1,000,000 possibilities —
-                                    // trivially brute-forceable inside its 15-minute
-                                    // validity window without a limit on attempts.
                                     let email_key = format!("verify-email:{}", email.to_lowercase());
                                     let ip_key = format!("verify-ip:{}", client_ip);
                                     let email_ok = rate_limiter_clone.check(&email_key, 10, 900).await;
@@ -642,10 +622,6 @@ impl P2PNode {
 
                             let response = match email {
                                 Some(email) => {
-                                    // Guards against email-bombing a target inbox, and
-                                    // against exhausting Gmail's daily send limit (which
-                                    // would silently break verification for every real
-                                    // user for the rest of that day).
                                     let email_key = format!("resend-email:{}", email.to_lowercase());
                                     let ip_key = format!("resend-ip:{}", client_ip);
                                     let email_ok = rate_limiter_clone.check(&email_key, 3, 3600).await;
@@ -744,7 +720,7 @@ impl P2PNode {
                                                 version: 1,
                                                 previous_block_hash: prev_hash.clone(),
                                                 merkle_root: vec![0; 32],
-                                                timestamp: 0, // not part of the PoW hash
+                                                timestamp: 0,
                                                 block_height: next_height,
                                                 miner: miner_bytes.clone(),
                                                 nonce,
@@ -778,13 +754,6 @@ impl P2PNode {
                                                 let block = Block { header: final_header, transactions: accepted };
                                                 let block_hash = block.calculate_hash();
 
-                                                // Same deterministic retargeting as the gossip/catch-up
-                                                // path in apply_verified_block — must produce an
-                                                // identical result, since this node's peers will
-                                                // recompute the same thing when they receive this block.
-                                                // (first_height > 0 guard: see the detailed comment in
-                                                // apply_verified_block — skips the first window, which
-                                                // would otherwise reference genesis's fake timestamp.)
                                                 if eng.state.chain_height % RETARGET_INTERVAL == 0 {
                                                     let first_height = eng.state.chain_height - RETARGET_INTERVAL;
                                                     if first_height > 0 {
@@ -817,7 +786,7 @@ impl P2PNode {
                                                     next_height, hex::encode(&block_hash)
                                                 )
                                             }
-                                            } // closes the min-block-interval else branch
+                                            }
                                         }
                                         Err(_) => "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nminer must be valid hex\r\n".to_string(),
                                     }
@@ -886,6 +855,7 @@ impl P2PNode {
         mempool: Arc<Mutex<Vec<Transaction>>>,
         vault_a_seed: Arc<[u8; 32]>,
         vault_b_seed: Arc<[u8; 32]>,
+        peer_activity: PeerActivity,
     ) -> Result<(), Box<dyn Error>> {
         let address = format!("127.0.0.1:{}", admin_port);
         let listener = TcpListener::bind(&address).await?;
@@ -902,6 +872,7 @@ impl P2PNode {
                     let mempool_clone = mempool.clone();
                     let va_seed = vault_a_seed.clone();
                     let vb_seed = vault_b_seed.clone();
+                    let peer_activity_clone = peer_activity.clone();
                     tokio::spawn(async move {
                         let request_str = read_http_request(&mut socket).await;
                         if request_str.is_empty() {
@@ -909,12 +880,6 @@ impl P2PNode {
                         }
                         let first_line = request_str.lines().next().unwrap_or("");
 
-                        // CORS preflight — needed so the Master Admin Dashboard
-                        // (served from ONE node's admin port) can fetch the
-                        // OTHER node's admin port too. Both admin servers stay
-                        // loopback-only regardless — this only affects which
-                        // origins the browser allows reading the response
-                        // from, not who can reach the socket.
                         if first_line.starts_with("OPTIONS") {
                             let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n";
                             let _ = socket.write_all(resp.as_bytes()).await;
@@ -945,6 +910,28 @@ impl P2PNode {
                                 )) / COIN
                             );
                             let _ = socket.write_all(json_response.as_bytes()).await;
+
+                        } else if first_line.starts_with("GET /api/admin/peers") {
+                            // Real, direct visibility into who's genuinely
+                            // contacted this node's P2P port — not just who's
+                            // in our own configured peer list.
+                            let activity = peer_activity_clone.lock().await;
+                            let now = chrono::Utc::now().timestamp();
+                            let mut items: Vec<String> = Vec::new();
+                            for (addr, last_seen) in activity.iter() {
+                                let seconds_ago = now - last_seen;
+                                items.push(format!(
+                                    "{{\"address\":\"{}\",\"seconds_ago\":{}}}",
+                                    addr, seconds_ago
+                                ));
+                            }
+                            let json_response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"count\":{},\"peers\":[{}]}}\r\n",
+                                items.len(),
+                                items.join(",")
+                            );
+                            let _ = socket.write_all(json_response.as_bytes()).await;
+
                         } else if first_line.starts_with("GET /api/admin/users") {
                             let accounts = users::list_all_users(&db_clone);
                             let mut items = Vec::with_capacity(accounts.len());
