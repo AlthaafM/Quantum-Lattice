@@ -61,7 +61,6 @@ async fn main() {
     } else {
         (8033, 8034, 18034, "./ql_db_node1", "master_vault_a", vec!["127.0.0.1:9033".to_string()])
     };
-
     // Optional, purely additive: real external peers (e.g. someone else's
     // independently-run node) can be added without touching the hardcoded
     // defaults above at all, via a comma-separated env var:
@@ -143,6 +142,7 @@ async fn main() {
     let mempool: Arc<Mutex<Vec<Transaction>>> = Arc::new(Mutex::new(Vec::new()));
     let rate_limiter = Arc::new(ratelimit::RateLimiter::new());
     let db = Arc::new(db);
+    let peer_activity: network::PeerActivity = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     let admin_token = get_or_create_admin_token(key_prefix);
     println!(
@@ -156,7 +156,7 @@ async fn main() {
 
     let p2p_node = P2PNode::new(p2p_port, rpc_port);
     p2p_node
-        .start_p2p_server(engine.clone(), db.clone(), peers.clone())
+        .start_p2p_server(engine.clone(), db.clone(), peers.clone(), peer_activity.clone())
         .await
         .expect("P2P server failed");
     p2p_node
@@ -164,15 +164,27 @@ async fn main() {
         .await
         .expect("RPC server failed");
     p2p_node
-        .start_admin_server(admin_port, engine.clone(), vault_a_bytes.clone(), vault_b_bytes.clone(), admin_token, db.clone(), mempool.clone(), vault_a_seed.clone(), vault_b_seed.clone())
+        .start_admin_server(admin_port, engine.clone(), vault_a_bytes.clone(), vault_b_bytes.clone(), admin_token, db.clone(), mempool.clone(), vault_a_seed.clone(), vault_b_seed.clone(), peer_activity.clone())
         .await
         .expect("Admin server failed");
 
-    // Phase 4: catch up immediately on boot in case blocks were produced
-    // while this node was offline — don't wait for the next gossiped block
-    // to reveal the gap.
+    // Periodic catch-up — without this, a node only ever checks for missed
+    // blocks once at startup. If a peer was briefly unreachable at boot, or
+    // simply joins the network later, there was previously no automatic way
+    // to recover without a manual restart. Checking periodically (every 60s)
+    // means every node stays genuinely current on its own going forward.
     println!("[STARTUP] Checking peers for any blocks we missed while offline...");
-    P2PNode::catch_up(engine.clone(), db.clone(), peers.clone()).await;
+    {
+        let engine_for_catchup = engine.clone();
+        let db_for_catchup = db.clone();
+        let peers_for_catchup = peers.clone();
+        tokio::spawn(async move {
+            loop {
+                P2PNode::catch_up(engine_for_catchup.clone(), db_for_catchup.clone(), peers_for_catchup.clone()).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+    }
 
     println!(
         "\n[NODE ONLINE] P2P: {} | Public RPC: {} | Admin(loopback only): {}",
