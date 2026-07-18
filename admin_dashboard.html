@@ -97,6 +97,26 @@
             </div>
         </div>
 
+        <div class="section-title">Live Peer Activity (combined)</div>
+        <div class="grid">
+            <div class="card" style="grid-column: 1 / -1;">
+                <h3>Connected Peers <span class="label" id="peers-count" style="margin-left:10px;"></span></h3>
+                <p class="label">Real, direct evidence of who's genuinely contacted this node's P2P port and successfully exchanged data — independent of which peers this node is itself configured to reach out to.</p>
+                <table class="users-table">
+                    <thead>
+                        <tr>
+                            <th>Address</th>
+                            <th>Last Seen</th>
+                            <th>Seen On</th>
+                        </tr>
+                    </thead>
+                    <tbody id="peers-tbody">
+                        <tr><td colspan="3" style="color:#64748b;">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <div class="section-title">Registered Users (combined)</div>
         <div class="grid">
             <div class="card" style="grid-column: 1 / -1;">
@@ -183,6 +203,55 @@
             return addr.slice(0, 16) + '…' + addr.slice(-8);
         }
 
+        function formatSecondsAgo(secs) {
+            if (secs < 0) secs = 0;
+            if (secs < 60) return secs + 's ago';
+            if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+            return Math.floor(secs / 3600) + 'h ago';
+        }
+
+        async function fetchNodePeers(node) {
+            if (!node.token) return [];
+            try {
+                const res = await fetch('http://127.0.0.1:' + node.port + '/api/admin/peers?token=' + encodeURIComponent(node.token));
+                if (res.status !== 200) return [];
+                const data = await res.json();
+                return (data.peers || []).map(p => Object.assign({}, p, { seenOn: node.prefix === 'n1' ? 'Node 1' : 'Node 2' }));
+            } catch (e) {
+                return [];
+            }
+        }
+
+        async function refreshPeers() {
+            const results = await Promise.all([fetchNodePeers(SELF), fetchNodePeers(PEER)]);
+            const combined = results[0].concat(results[1]);
+
+            // If the same address contacted both nodes, keep only the most
+            // recent sighting rather than showing it twice.
+            const byAddress = new Map();
+            for (const p of combined) {
+                const existing = byAddress.get(p.address);
+                if (!existing || p.seconds_ago < existing.seconds_ago) {
+                    byAddress.set(p.address, p);
+                }
+            }
+            const deduped = Array.from(byAddress.values()).sort((a, b) => a.seconds_ago - b.seconds_ago);
+
+            document.getElementById('peers-count').innerText = '(' + deduped.length + ')';
+            if (deduped.length === 0) {
+                document.getElementById('peers-tbody').innerHTML = '<tr><td colspan="3" style="color:#64748b;">No external peer activity recorded yet.</td></tr>';
+                return;
+            }
+            const rows = deduped.map(function (p) {
+                return '<tr>' +
+                    '<td>' + p.address + '</td>' +
+                    '<td>' + formatSecondsAgo(p.seconds_ago) + '</td>' +
+                    '<td>' + p.seenOn + '</td>' +
+                    '</tr>';
+            }).join('');
+            document.getElementById('peers-tbody').innerHTML = rows;
+        }
+
         async function fetchNodeUsers(node) {
             if (!node.token) return [];
             try {
@@ -231,6 +300,7 @@
         function refreshAll() {
             fetchNodeAdmin(SELF);
             fetchNodeAdmin(PEER);
+            refreshPeers();
             refreshUsers();
         }
 
