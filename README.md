@@ -21,6 +21,8 @@ Built by [Futuristic AI](https://futuristicai.co.za), Durban, South Africa.
 - *Encrypted vaults at rest* — treasury keys are password-protected (AES-256-GCM + PBKDF2), unlocked once into memory at node startup, never re-read from disk in plaintext.
 - *Real difficulty retargeting* — a 5-minute block time target, adjusted every 10 blocks based on actual observed timing.
 - *Miners are paid directly to any wallet address you already control* — no separate mining account to manage or migrate funds out of later.
+- *Continuous peer sync* — nodes automatically re-check their peers for missed blocks on an ongoing basis, not just once at startup, so a node stays current on its own even after a brief network interruption.
+- *Live peer visibility* — the admin dashboard shows real, direct evidence of which peers have actually contacted a node, independent of its own configured peer list.
 - *Optional email verification* (OTP) for the wallet directory layer, with rate limiting on every endpoint that sends email or accepts public input.
 - *A public "Security & Transparency" page*, with real, independently reproducible cryptographic test vectors — see the live explorer.
 
@@ -53,6 +55,20 @@ cargo run --release --bin quantum-lattice_core -- node1
 
 
 On first run, you'll be prompted to set passwords for the two vault keys (Master Vault A and Operational Vault B), which are generated and encrypted automatically.
+
+## Running Your Own Full Node
+
+A brand-new node generates its own genesis block independently — which means it won't automatically match an existing network's chain history. To join as a real peer:
+
+1. Get a chain snapshot from an existing node operator to start from
+2. Place its contents in a folder named ql_db_node1 in the project directory
+3. Start the node with a known peer, so it stays in sync going forward:
+
+bash
+QL_EXTRA_PEERS=peer_address:port cargo run --release --bin quantum-lattice_core -- node1
+
+
+From there, the node checks its peers for any missed blocks continuously, not just at startup, so it stays current automatically.
 
 ## License
 
