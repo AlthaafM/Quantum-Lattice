@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quantum-Lattice Pool</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void: #07070d;
+    --panel: #12132472;
+    --panel-solid: #14152a;
+    --edge: #262842;
+    --lattice-a: #7c5cfc;
+    --lattice-b: #22d3c5;
+    --success: #34d399;
+    --danger: #f26d6d;
+    --text: #eae8f5;
+    --text-dim: #8b87a8;
+    --text-faint: #5b5878;
+    --mono: 'JetBrains Mono', monospace;
+    --display: 'Space Grotesk', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--void); color: var(--text);
+    font-family: var(--display); min-height: 100vh; overflow-x: hidden;
+  }
+  #lattice-bg {
+    position: fixed; inset: 0; z-index: 0; background-color: var(--void);
+    background-image:
+      linear-gradient(30deg, #1a1c33 1px, transparent 1px),
+      linear-gradient(150deg, #1a1c33 1px, transparent 1px),
+      linear-gradient(90deg, #14152a 1px, transparent 1px);
+    background-size: 64px 110px, 64px 110px, 64px 110px;
+    opacity: 0.45; animation: driftLattice 60s linear infinite;
+  }
+  @keyframes driftLattice { 0% { background-position: 0 0, 0 0, 0 0; } 100% { background-position: 640px 0, -640px 0, 0 1100px; } }
+  #lattice-glow {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: radial-gradient(ellipse 900px 700px at 50% -10%, rgba(124,92,252,0.15), transparent 60%),
+                radial-gradient(ellipse 700px 600px at 90% 100%, rgba(34,211,197,0.09), transparent 60%);
+  }
+  @media (prefers-reduced-motion: reduce) { #lattice-bg { animation: none; } }
+
+  .stage { position: relative; z-index: 1; max-width: 980px; margin: 0 auto; padding: 32px 24px 100px; }
+
+  .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; flex-wrap: wrap; gap: 14px; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .mark {
+    width: 30px; height: 30px;
+    background: conic-gradient(from 45deg, var(--lattice-a), var(--lattice-b), var(--lattice-a));
+    clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  }
+  .brand .name { font-weight: 600; font-size: 15px; }
+  .brand .name b { font-weight: 700; }
+  .brand .sub { font-size: 11px; color: var(--text-faint); margin-left: 6px; }
+  .back-link { color: var(--lattice-b); font-size: 13px; font-weight: 600; text-decoration: none; }
+  .back-link:hover { text-decoration: underline; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .panel { background: var(--panel); backdrop-filter: blur(18px); border: 1px solid var(--edge); border-radius: 16px; padding: 22px; }
+  .panel .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); font-weight: 600; margin-bottom: 8px; }
+  .stat-value { font-family: var(--mono); font-size: 26px; font-weight: 600; }
+  .stat-sub { font-size: 12px; color: var(--text-faint); margin-top: 4px; }
+  .pulse-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); display: inline-block; margin-right: 6px; animation: pulseDot 2s ease-in-out infinite; }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .section-title { font-size: 18px; font-weight: 700; margin: 0 0 16px; }
+
+  .card { background: var(--panel); backdrop-filter: blur(18px); border: 1px solid var(--edge); border-radius: 16px; padding: 22px; margin-bottom: 28px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 8px 10px; color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--edge); }
+  td { padding: 11px 10px; border-bottom: 1px solid var(--edge); font-size: 13px; font-family: var(--mono); }
+  tr:last-child td { border-bottom: none; }
+  .rank { color: var(--lattice-b); font-weight: 700; }
+  .empty-row { color: var(--text-faint); font-family: var(--display); font-size: 13px; text-align: center; padding: 20px !important; }
+
+  .join-card { background: var(--panel); border: 1px solid rgba(34,211,197,0.35); border-radius: 16px; padding: 26px; margin-bottom: 28px; }
+  .join-card h3 { margin: 0 0 8px; font-size: 17px; }
+  .join-card p { color: var(--text-dim); font-size: 13.5px; line-height: 1.55; margin: 0 0 16px; }
+  .cmd-block {
+    background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px; padding: 12px 14px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--text); word-break: break-all; line-height: 1.7;
+    margin-bottom: 10px;
+  }
+  .cmd-block .lbl { color: var(--text-faint); display: block; margin-bottom: 4px; font-family: var(--display); font-size: 10.5px; text-transform: uppercase; }
+
+  footer { text-align: center; margin-top: 40px; }
+  footer a { color: var(--lattice-b); text-decoration: none; font-size: 12px; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div id="lattice-bg"></div>
+<div id="lattice-glow"></div>
+
+<div class="stage">
+  <div class="top-bar">
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <span class="name"><b>QUANTUM</b>-LATTICE</span>
+        <span class="sub">MINING POOL</span>
+      </div>
+    </div>
+    <a class="back-link" href="https://quantum-lattice.futuristicai.co.za" target="_blank" rel="noopener">Main Explorer</a>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="eyebrow"><span class="pulse-dot"></span>Current Round</div>
+      <div class="stat-value" id="stat-height">-</div>
+      <div class="stat-sub">Block height</div>
+    </div>
+    <div class="panel">
+      <div class="eyebrow">Real Network Difficulty</div>
+      <div class="stat-value" id="stat-real-diff">-</div>
+      <div class="stat-sub">Leading zero bits</div>
+    </div>
+    <div class="panel">
+      <div class="eyebrow">Pool Difficulty</div>
+      <div class="stat-value" id="stat-pool-diff" style="color: var(--lattice-b);">-</div>
+      <div class="stat-sub">Easier target for shares</div>
+    </div>
+    <div class="panel">
+      <div class="eyebrow">Active Contributors</div>
+      <div class="stat-value" id="stat-contributors">-</div>
+      <div class="stat-sub">This round</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="eyebrow">Pool Hashrate</div>
+      <div class="stat-value" id="stat-hashrate" style="color: var(--lattice-b);">-</div>
+      <div class="stat-sub">Estimated, combined</div>
+    </div>
+    <div class="panel">
+      <div class="eyebrow">Blocks Found</div>
+      <div class="stat-value" id="stat-blocks-found" style="color: var(--success);">-</div>
+      <div class="stat-sub">All-time</div>
+    </div>
+    <div class="panel">
+      <div class="eyebrow">Total Distributed</div>
+      <div class="stat-value" id="stat-total-distributed" style="color: var(--success);">-</div>
+      <div class="stat-sub">QL, all-time</div>
+    </div>
+  </div>
+
+  <div class="join-card">
+    <h3>Join the pool</h3>
+    <p>Same miner you already have, just a different command. Rewards are paid directly to your own wallet address whenever the pool wins.</p>
+    <div class="cmd-block"><span class="lbl">Linux</span>./miner --pool ql-pool.futuristicai.co.za:7999 YOUR_WALLET_ADDRESS</div>
+    <div class="cmd-block"><span class="lbl">Windows</span>.\miner.exe --pool ql-pool.futuristicai.co.za:7999 YOUR_WALLET_ADDRESS</div>
+  </div>
+
+  <div class="section-title">Live standings, this round</div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Rank</th><th>Address</th><th>Shares</th><th>Est. Hashrate</th></tr></thead>
+      <tbody id="standings-tbody">
+        <tr><td colspan="4" class="empty-row">Loading</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section-title">Recent payouts</div>
+  <div class="card">
+    <table>
+      <thead><tr><th>When</th><th>Total Paid</th><th>Contributors</th></tr></thead>
+      <tbody id="payouts-tbody">
+        <tr><td colspan="3" class="empty-row">Loading</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer><a href="https://futuristicai.co.za" target="_blank" rel="noopener">FuturisticAI</a></footer>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function truncateHex(h) {
+    if (!h || h.length <= 28) return h;
+    return h.slice(0, 16) + '...' + h.slice(-8);
+  }
+  function timeAgo(ts) {
+    const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (secs < 60) return secs + 's ago';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+    return Math.floor(secs / 3600) + 'h ago';
+  }
+  function formatHashrate(hs) {
+    if (hs >= 1000000) return (hs / 1000000).toFixed(2) + ' MH/s';
+    if (hs >= 1000) return (hs / 1000).toFixed(2) + ' KH/s';
+    return Math.round(hs) + ' H/s';
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch('/pool/stats');
+      const data = await res.json();
+
+      if (data.round) {
+        $('stat-height').textContent = data.round.block_height.toLocaleString();
+        $('stat-real-diff').textContent = data.round.real_difficulty_bits;
+        $('stat-pool-diff').textContent = data.round.pool_difficulty_bits;
+      }
+      $('stat-contributors').textContent = data.standings.length;
+      $('stat-hashrate').textContent = formatHashrate(data.pool_hashrate);
+      $('stat-blocks-found').textContent = data.all_time_blocks_found.toLocaleString();
+      $('stat-total-distributed').textContent = Number(data.all_time_ql_distributed).toLocaleString(undefined, {maximumFractionDigits: 2});
+
+      if (data.standings.length === 0) {
+        $('standings-tbody').innerHTML = '<tr><td colspan="4" class="empty-row">No shares submitted yet this round.</td></tr>';
+      } else {
+        $('standings-tbody').innerHTML = data.standings.map((s, i) =>
+          '<tr><td class="rank">#' + (i + 1) + '</td><td>' + truncateHex(s.address) + '</td><td>' + s.shares.toLocaleString() + '</td><td>' + formatHashrate(s.estimated_hashrate) + '</td></tr>'
+        ).join('');
+      }
+
+      if (data.recent_payouts.length === 0) {
+        $('payouts-tbody').innerHTML = '<tr><td colspan="3" class="empty-row">No payouts recorded yet.</td></tr>';
+      } else {
+        $('payouts-tbody').innerHTML = data.recent_payouts.map(p =>
+          '<tr><td>' + timeAgo(p.timestamp) + '</td><td>' + Number(p.total_paid_ql).toLocaleString(undefined, {maximumFractionDigits: 4}) + ' QL</td><td>' + p.contributor_count + '</td></tr>'
+        ).join('');
+      }
+    } catch (e) {
+      // leave whatever was last shown
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>
