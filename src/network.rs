@@ -470,6 +470,49 @@ impl P2PNode {
                             );
                             let _ = socket.write_all(json_response.as_bytes()).await;
 
+                        } else if first_line.starts_with("GET /api/block") {
+                            // Full detail on a single block, including its
+                            // individual transactions — distinct from
+                            // /api/blocks/recent, which only ever returns
+                            // summary counts, not the actual sender/receiver/
+                            // amount breakdown inside each block.
+                            let height_param = extract_query_param(first_line, "height");
+                            let response = match height_param.and_then(|h| h.parse::<u64>().ok()) {
+                                Some(height) => {
+                                    match db_clone.get(format!("block_{}", height).as_bytes()) {
+                                        Ok(Some(bytes)) => {
+                                            match deserialize::<Block>(&bytes) {
+                                                Ok(block) => {
+                                                    let hash = block.calculate_hash();
+                                                    let tx_items: Vec<String> = block.transactions.iter().map(|tx| {
+                                                        format!(
+                                                            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount_ql\":{}}}",
+                                                            hex::encode(&tx.sender),
+                                                            hex::encode(&tx.receiver),
+                                                            tx.amount / COIN
+                                                        )
+                                                    }).collect();
+                                                    format!(
+                                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"height\":{},\"hash\":\"{}\",\"previous_hash\":\"{}\",\"timestamp\":{},\"miner\":\"{}\",\"nonce\":{},\"transactions\":[{}]}}\r\n",
+                                                        block.header.block_height,
+                                                        hex::encode(&hash),
+                                                        hex::encode(&block.header.previous_block_hash),
+                                                        block.header.timestamp,
+                                                        hex::encode(&block.header.miner),
+                                                        block.header.nonce,
+                                                        tx_items.join(",")
+                                                    )
+                                                }
+                                                Err(_) => "HTTP/1.1 500 Internal Server Error\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Could not read that block.\"}\r\n".to_string(),
+                                            }
+                                        }
+                                        _ => "HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"No block at that height.\"}\r\n".to_string(),
+                                    }
+                                }
+                                None => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Expected a numeric ?height= parameter.\"}\r\n".to_string(),
+                            };
+                            let _ = socket.write_all(response.as_bytes()).await;
+
                         } else if first_line.starts_with("POST /api/support") {
                             let body = request_str.split("\r\n\r\n").nth(1).unwrap_or("");
                             let name = extract_json_string(body, "name");
