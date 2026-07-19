@@ -41,6 +41,7 @@
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -350,9 +351,22 @@ struct RoundTemplate {
     pool_difficulty_bits: u32,
 }
 
+/// A real record of a completed payout — kept purely so a dashboard can
+/// show genuine history, not just the current live round.
+#[derive(Clone)]
+struct PayoutRecord {
+    timestamp: i64,
+    total_paid_ql: f64,
+    contributor_count: usize,
+}
+
 struct SharedState {
     template: Mutex<Option<RoundTemplate>>,
     shares: Mutex<HashMap<String, u64>>,
+    payout_history: Mutex<Vec<PayoutRecord>>,
+    round_start_time: Mutex<i64>,
+    all_time_blocks_found: Mutex<u64>,
+    all_time_ql_distributed: Mutex<f64>,
 }
 
 // ---------------------------------------------------------------------
@@ -499,9 +513,74 @@ fn handle_miner_connection(
             let _ = stream.write_all(resp.as_bytes());
         }
 
+    } else if first_line.starts_with("GET /pool/stats") {
+        // Real, live data for a dashboard — current round info, a live
+        // leaderboard with genuine hashrate estimates, and permanent
+        // all-time totals plus recent payout history.
+        let template = state.template.lock().unwrap().clone();
+        let shares = state.shares.lock().unwrap().clone();
+        let history = state.payout_history.lock().unwrap().clone();
+        let round_start = *state.round_start_time.lock().unwrap();
+        let all_time_blocks = *state.all_time_blocks_found.lock().unwrap();
+        let all_time_ql = *state.all_time_ql_distributed.lock().unwrap();
+
+        let elapsed_secs = (chrono::Utc::now().timestamp() - round_start).max(1) as f64;
+        let pool_difficulty_bits = template.as_ref().map(|t| t.pool_difficulty_bits).unwrap_or(20);
+        // A share found at difficulty D took, on average, 2^D hash
+        // attempts — real, standard math used by every real mining pool
+        // to estimate contributor hashrate from observed share rate,
+        // not a guess dressed up as data.
+        let hashes_per_share = 2f64.powi(pool_difficulty_bits as i32);
+
+        let mut standings: Vec<(String, u64)> = shares.into_iter().collect();
+        standings.sort_by(|a, b| b.1.cmp(&a.1));
+        let total_shares_this_round: u64 = standings.iter().map(|(_, c)| c).sum();
+        let pool_hashrate = (total_shares_this_round as f64 * hashes_per_share) / elapsed_secs;
+
+        let standings_json: Vec<String> = standings.iter().map(|(addr, count)| {
+            let hashrate = (*count as f64 * hashes_per_share) / elapsed_secs;
+            format!(
+                "{{\"address\":\"{}\",\"shares\":{},\"estimated_hashrate\":{:.0}}}",
+                addr, count, hashrate
+            )
+        }).collect();
+
+        let history_json: Vec<String> = history.iter().rev().map(|r| {
+            format!(
+                "{{\"timestamp\":{},\"total_paid_ql\":{:.4},\"contributor_count\":{}}}",
+                r.timestamp, r.total_paid_ql, r.contributor_count
+            )
+        }).collect();
+
+        let round_json = match template {
+            Some(t) => format!(
+                "{{\"block_height\":{},\"real_difficulty_bits\":{},\"pool_difficulty_bits\":{}}}",
+                t.block_height, t.real_difficulty_bits, t.pool_difficulty_bits
+            ),
+            None => "null".to_string(),
+        };
+
+        let json_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"pool_address\":\"{}\",\"round\":{},\"pool_hashrate\":{:.0},\"all_time_blocks_found\":{},\"all_time_ql_distributed\":{:.4},\"standings\":[{}],\"recent_payouts\":[{}]}}\r\n",
+            pool_pk_hex,
+            round_json,
+            pool_hashrate,
+            all_time_blocks,
+            all_time_ql,
+            standings_json.join(","),
+            history_json.join(",")
+        );
+        let _ = stream.write_all(json_response.as_bytes());
+
     } else {
-        let resp = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nUnknown endpoint.\r\n";
-        let _ = stream.write_all(resp.as_bytes());
+        let html_content = fs::read_to_string("pool_dashboard.html")
+            .unwrap_or_else(|_| "<h1>pool_dashboard.html missing</h1>".to_string());
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            html_content.len(),
+            html_content
+        );
+        let _ = stream.write_all(http_response.as_bytes());
     }
 }
 
@@ -583,11 +662,16 @@ fn submit_win_and_pay_out(node_address: &str, state: &Arc<SharedState>, pool_see
 fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8; 32], pool_pk: Vec<u8>, pool_pk_hex: String) {
     // Snapshot and reset the round's shares atomically, so new shares
     // arriving during payout processing count toward the NEXT round, not
-    // this one.
+    // this one. Also mark a fresh start time here — this is genuinely
+    // when share accumulation restarts, which is what hashrate estimates
+    // need to be measured against, not simply when the chain's block
+    // height last changed (shares span multiple heights until the pool
+    // itself wins).
     let round_shares: HashMap<String, u64> = {
         let mut shares = state.shares.lock().unwrap();
         std::mem::take(&mut *shares)
     };
+    *state.round_start_time.lock().unwrap() = chrono::Utc::now().timestamp();
 
     let total_shares: u64 = round_shares.values().sum();
     if total_shares == 0 {
@@ -620,6 +704,7 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
     println!("[POOL] Distributing {:.4} QL (the pool's current real balance) across {} contributor(s)...", available_ql, round_shares.len());
 
     const COIN: f64 = 100_000_000.0; // matches the node's smallest-unit scale
+    let contributor_count = round_shares.len();
 
     for (contributor_hex, share_count) in round_shares {
         let proportion = share_count as f64 / total_shares as f64;
@@ -653,6 +738,26 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
             }
         }
     }
+
+    // Record real history for the dashboard — bounded so this never grows
+    // without limit over a long-running pool.
+    {
+        let mut history = state.payout_history.lock().unwrap();
+        history.push(PayoutRecord {
+            timestamp: chrono::Utc::now().timestamp(),
+            total_paid_ql: available_ql,
+            contributor_count,
+        });
+        if history.len() > 15 {
+            let excess = history.len() - 15;
+            history.drain(0..excess);
+        }
+    }
+
+    // Permanent, unbounded totals — distinct from the bounded history
+    // above, since these should never lose data over the pool's lifetime.
+    *state.all_time_blocks_found.lock().unwrap() += 1;
+    *state.all_time_ql_distributed.lock().unwrap() += available_ql;
 }
 
 fn print_usage_and_exit() -> ! {
@@ -685,6 +790,10 @@ fn main() {
     let state = Arc::new(SharedState {
         template: Mutex::new(None),
         shares: Mutex::new(HashMap::new()),
+        payout_history: Mutex::new(Vec::new()),
+        round_start_time: Mutex::new(chrono::Utc::now().timestamp()),
+        all_time_blocks_found: Mutex::new(0),
+        all_time_ql_distributed: Mutex::new(0.0),
     });
 
     // Background thread: keeps the shared template current by periodically
