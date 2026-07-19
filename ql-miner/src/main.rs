@@ -30,6 +30,7 @@
 // sitting in a wallet you control.
 //
 // Usage: cargo run --bin miner -- quantum-lattice.futuristicai.co.za:8034 YOUR_WALLET_ADDRESS_HEX
+// Pool:  cargo run --bin miner -- --pool ql-pool.futuristicai.co.za:7999 YOUR_WALLET_ADDRESS_HEX
 
 use sha3::{Digest, Sha3_256};
 use std::env;
@@ -212,16 +213,19 @@ fn print_usage_and_exit() -> ! {
     eprintln!("=== QUANTUM-LATTICE (QL) MINING CLIENT ===");
     eprintln!();
     eprintln!("Usage: miner NODE_ADDRESS:PORT YOUR_WALLET_ADDRESS_HEX [THREAD_COUNT]");
+    eprintln!("       miner --pool POOL_ADDRESS:PORT YOUR_WALLET_ADDRESS_HEX [THREAD_COUNT]");
     eprintln!();
-    eprintln!("  NODE_ADDRESS:PORT       The QL node to mine against, e.g. 127.0.0.1:8034");
+    eprintln!("  NODE_ADDRESS:PORT       The QL node to mine against directly, e.g. 127.0.0.1:8034");
+    eprintln!("  POOL_ADDRESS:PORT       A mining pool to contribute to instead of mining solo.");
     eprintln!("  YOUR_WALLET_ADDRESS_HEX Your own QL Wallet address (get this from the wallet's");
-    eprintln!("                          dashboard) — this is where mining rewards are paid.");
+    eprintln!("                          dashboard) — where solo rewards are paid, or where pool");
+    eprintln!("                          payouts are credited.");
     eprintln!("  THREAD_COUNT            Optional. Number of CPU threads to use for mining.");
     eprintln!("                          Defaults to every core available on this machine.");
     eprintln!();
-    eprintln!("Example:");
+    eprintln!("Examples:");
     eprintln!("  miner quantum-lattice.futuristicai.co.za:8034 b8bd5b6d7983d328...5673");
-    eprintln!("  miner quantum-lattice.futuristicai.co.za:8034 b8bd5b6d7983d328...5673 8");
+    eprintln!("  miner --pool 127.0.0.1:7999 b8bd5b6d7983d328...5673");
     std::process::exit(1);
 }
 
@@ -232,8 +236,15 @@ fn main() {
     if args.len() < 3 {
         print_usage_and_exit();
     }
-    let node_address = args[1].clone();
-    let miner_pk_hex = args[2].trim();
+
+    let pool_mode = args[1] == "--pool";
+    let (address_index, pk_index, thread_index) = if pool_mode { (2, 3, 4) } else { (1, 2, 3) };
+    if args.len() <= pk_index {
+        print_usage_and_exit();
+    }
+
+    let node_address = args[address_index].clone();
+    let miner_pk_hex = args[pk_index].trim();
 
     let miner_pk = match hex::decode(miner_pk_hex) {
         Ok(bytes) => bytes,
@@ -250,29 +261,34 @@ fn main() {
         print_usage_and_exit();
     }
 
-    // Optional 3rd argument to override the thread count — otherwise uses
-    // every logical CPU core available. Previously this only ever used a
-    // single core regardless of hardware, which left most of a many-core
-    // machine's real capacity unused.
+    // Optional trailing argument to override the thread count — otherwise
+    // uses every logical CPU core available.
     let num_threads: usize = args
-        .get(3)
+        .get(thread_index)
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 
     println!("=== QUANTUM-LATTICE (QL) MINING CLIENT ===");
-    println!("[CONFIG] Connecting to node: {}", node_address);
-    println!("[MINER] Mining rewards will be paid to: {}", hex::encode(&miner_pk));
+    if pool_mode {
+        println!("[CONFIG] Contributing to pool: {}", node_address);
+        println!("[MINER] Pool payouts will be credited to: {}", hex::encode(&miner_pk));
+    } else {
+        println!("[CONFIG] Connecting to node: {}", node_address);
+        println!("[MINER] Mining rewards will be paid to: {}", hex::encode(&miner_pk));
+    }
     println!("[MINER] Using {} CPU thread(s) for mining.", num_threads);
 
     let miner_pk = Arc::new(miner_pk);
+    let template_path = if pool_mode { "/pool/template" } else { "/api/mining/template" };
+    let submit_path = if pool_mode { "/pool/submit" } else { "/api/mining/submit" };
 
     loop {
         let fetch_start = now();
-        let response = match http_get(&node_address, "/api/mining/template") {
+        let response = match http_get(&node_address, template_path) {
             Some(r) => r,
             None => {
-                println!("[MINER] Could not reach node at {} — retrying in 5s...", node_address);
+                println!("[MINER] Could not reach {} — retrying in 5s...", node_address);
                 thread::sleep(Duration::from_secs(5));
                 continue;
             }
@@ -291,7 +307,27 @@ fn main() {
             Some(h) => h,
             None => { thread::sleep(Duration::from_secs(5)); continue; }
         };
-        let difficulty = extract_json_number(body, "difficulty_bits").unwrap_or(20) as u32;
+
+        // In pool mode, the hash MUST be computed using the POOL's own
+        // address, not this miner's — the pool is the one whose identity
+        // actually goes on-chain if a share also happens to be a real
+        // block. This miner's own address is only ever used separately,
+        // purely so the pool knows who to credit for the share.
+        let (hash_address, difficulty) = if pool_mode {
+            let pool_address_hex = match extract_json_string(body, "pool_address") {
+                Some(a) => a,
+                None => { thread::sleep(Duration::from_secs(5)); continue; }
+            };
+            let pool_address = match hex::decode(&pool_address_hex) {
+                Ok(a) => a,
+                Err(_) => { thread::sleep(Duration::from_secs(5)); continue; }
+            };
+            let pool_difficulty = extract_json_number(body, "pool_difficulty_bits").unwrap_or(16) as u32;
+            (Arc::new(pool_address), pool_difficulty)
+        } else {
+            let real_difficulty = extract_json_number(body, "difficulty_bits").unwrap_or(20) as u32;
+            (miner_pk.clone(), real_difficulty)
+        };
 
         let prev_hash = Arc::new(hex::decode(&prev_hash_hex).unwrap_or_default());
         let merkle_root = Arc::new(hex::decode(&merkle_root_hex).unwrap_or_default());
@@ -302,6 +338,7 @@ fn main() {
         );
 
         let hash_start = now();
+        let timing_start = std::time::Instant::now();
         let found_flag = Arc::new(AtomicBool::new(false));
         let winning_nonce = Arc::new(AtomicU64::new(0));
         let total_tried = Arc::new(AtomicU64::new(0));
@@ -317,7 +354,7 @@ fn main() {
             let total_tried = total_tried.clone();
             let prev_hash = prev_hash.clone();
             let merkle_root = merkle_root.clone();
-            let miner_pk = miner_pk.clone();
+            let hash_address = hash_address.clone();
 
             let handle = thread::spawn(move || {
                 let mut start_nonce_bytes = [0u8; 8];
@@ -335,7 +372,7 @@ fn main() {
                     if found_flag.load(Ordering::Relaxed) {
                         break;
                     }
-                    let hash = calculate_pow_hash(1, &prev_hash, &merkle_root, block_height, &miner_pk, nonce);
+                    let hash = calculate_pow_hash(1, &prev_hash, &merkle_root, block_height, &hash_address, nonce);
                     if meets_difficulty(&hash, difficulty) {
                         winning_nonce.store(nonce, Ordering::SeqCst);
                         found_flag.store(true, Ordering::SeqCst);
@@ -363,9 +400,19 @@ fn main() {
         let found = found_flag.load(Ordering::Relaxed);
         let nonce = winning_nonce.load(Ordering::SeqCst);
 
+        let elapsed_secs = timing_start.elapsed().as_secs_f64().max(0.001);
+        let hashes_per_sec = tried as f64 / elapsed_secs;
+        let hashrate_display = if hashes_per_sec >= 1_000_000.0 {
+            format!("{:.2} MH/s", hashes_per_sec / 1_000_000.0)
+        } else if hashes_per_sec >= 1_000.0 {
+            format!("{:.2} KH/s", hashes_per_sec / 1_000.0)
+        } else {
+            format!("{:.0} H/s", hashes_per_sec)
+        };
+
         println!(
-            "[{}] [MINER] Batch of {} nonces finished across {} thread(s) (started {}) — {}",
-            now(), tried, num_threads, hash_start, if found { "FOUND" } else { "no match, refetching" }
+            "[{}] [MINER] Batch of {} nonces finished across {} thread(s) (started {}) — {} — {}",
+            now(), tried, num_threads, hash_start, hashrate_display, if found { "FOUND" } else { "no match, refetching" }
         );
 
         if !found {
@@ -377,11 +424,15 @@ fn main() {
             hex::encode(miner_pk.as_ref()),
             nonce
         );
-        match http_post(&node_address, "/api/mining/submit", &submit_body) {
+        match http_post(&node_address, submit_path, &submit_body) {
             Some(resp) => {
                 let resp_body = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
                 if resp.starts_with("HTTP/1.1 200") {
-                    println!("[MINER] Block accepted! {}", resp_body);
+                    if pool_mode {
+                        println!("[MINER] Share accepted! {}", resp_body);
+                    } else {
+                        println!("[MINER] Block accepted! {}", resp_body);
+                    }
                 } else {
                     let wait_secs = extract_json_number(resp_body, "retry_after_secs").unwrap_or(2);
                     println!(
@@ -391,7 +442,7 @@ fn main() {
                     thread::sleep(Duration::from_secs(wait_secs));
                 }
             }
-            None => println!("[MINER] Failed to submit — node unreachable."),
+            None => println!("[MINER] Failed to submit — unreachable."),
         }
     }
 }
