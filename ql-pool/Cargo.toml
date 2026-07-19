@@ -1,0 +1,31 @@
+[package]
+name = "ql-pool"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pool"
+path = "src/main.rs"
+
+[dependencies]
+# Deliberately standalone, same pattern as ql-miner — no RocksDB, since the
+# pool doesn't need a full chain database, just its own small encrypted
+# identity and in-memory share tracking for the current round.
+tokio = { version = "1", features = ["full"] }
+sha3 = "0.10"
+hex = "0.4.3"
+chrono = "0.4"
+getrandom = "0.4"
+ml-dsa = "0.1.1"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+rpassword = "7.5"
+# Needed to reach the real node over HTTPS if it's a public domain — same
+# pure-Rust TLS stack used in ql-miner, for the same reasons (no OpenSSL,
+# no C toolchain needed).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+
+[profile.release]
+opt-level = 3
