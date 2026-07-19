@@ -177,6 +177,28 @@
   .pq-intro { max-width: 720px; margin-bottom: 24px; }
   .pq-intro h2 { font-size: 22px; margin: 0 0 12px; }
   .pq-intro p { color: var(--text-dim); font-size: 14.5px; line-height: 1.65; margin: 0 0 12px; }
+
+  .pq-intro-row { display: flex; gap: 20px; align-items: flex-start; margin-bottom: 24px; }
+  .pq-intro-row .pq-intro { margin-bottom: 0; flex: 1; }
+  .pool-side-card {
+    flex-shrink: 0; width: 220px; background: var(--panel); backdrop-filter: blur(18px);
+    border: 1px solid rgba(34,211,197,0.35); border-radius: 16px; padding: 20px;
+    text-decoration: none; display: block; transition: transform 0.15s ease, border-color 0.15s ease;
+  }
+  .pool-side-card:hover { transform: translateY(-2px); border-color: var(--lattice-b); }
+  .pool-side-mark {
+    width: 26px; height: 26px; margin-bottom: 12px;
+    background: conic-gradient(from 45deg, var(--lattice-a), var(--lattice-b), var(--lattice-a));
+    clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  }
+  .pool-side-title { font-size: 14.5px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+  .pool-side-sub { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 14px; }
+  .pool-side-cta { font-size: 12.5px; font-weight: 700; color: var(--lattice-b); }
+  @media (max-width: 780px) {
+    .pq-intro-row { flex-direction: column; }
+    .pool-side-card { width: 100%; }
+  }
+
   .pq-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
   @media (max-width: 640px) { .pq-compare { grid-template-columns: 1fr; } }
   .pq-card { background: var(--panel); backdrop-filter: blur(18px); border: 1px solid var(--edge); border-radius: 16px; padding: 22px; }
@@ -229,6 +251,43 @@
     background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px; padding: 12px 14px;
     font-family: var(--mono); font-size: 11.5px; color: var(--text); word-break: break-all; line-height: 1.6;
   }
+
+  /* ---- Block search + detail modal ---- */
+  .block-search { display: flex; gap: 10px; margin-top: 4px; }
+  .block-search input[type="number"] {
+    flex: 1; background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px;
+    padding: 11px 14px; color: var(--text); font-family: var(--mono); font-size: 13px; outline: none;
+  }
+  .block-search input[type="number"]:focus { border-color: var(--lattice-a); }
+  .block-search button {
+    padding: 11px 20px; border-radius: 10px; border: none; font-family: var(--display); font-weight: 700;
+    font-size: 13px; cursor: pointer; background: linear-gradient(135deg, var(--lattice-a), #5a3fd6); color: white;
+    white-space: nowrap;
+  }
+  .chain-node { cursor: pointer; }
+
+  .block-modal-overlay {
+    position: fixed; inset: 0; z-index: 50; background: rgba(4,4,10,0.75); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .block-modal {
+    background: var(--panel-solid); border: 1px solid var(--edge); border-radius: 18px;
+    padding: 26px; max-width: 640px; width: 100%; max-height: 84vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .block-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+  .modal-close {
+    background: none; border: 1px solid var(--edge); color: var(--text-dim); width: 30px; height: 30px;
+    border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 1;
+  }
+  .modal-close:hover { color: var(--text); border-color: var(--lattice-b); }
+  .modal-row { display: flex; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--edge); font-size: 13px; }
+  .modal-row:last-child { border-bottom: none; }
+  .modal-row .k { color: var(--text-faint); flex-shrink: 0; }
+  .modal-row .v { font-family: var(--mono); color: var(--text); text-align: right; word-break: break-all; font-size: 12px; }
+  .modal-tx-title { font-size: 13px; font-weight: 700; margin: 20px 0 10px; color: var(--lattice-b); }
+  .modal-tx { background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; font-size: 11.5px; font-family: var(--mono); line-height: 1.7; }
+  .modal-tx .amt { color: var(--success); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -263,6 +322,10 @@
       <div class="chain-scroll" id="chain-scroll">
         <div style="color: var(--text-faint); font-size: 13px; padding: 20px;">Loading chain…</div>
       </div>
+      <div class="block-search">
+        <input type="number" id="block-search-input" placeholder="Jump to block #" min="0">
+        <button id="block-search-btn">View block</button>
+      </div>
     </div>
 
     <div class="pool-banner">
@@ -274,10 +337,18 @@
     </div>
 
     <div class="pq-section">
-      <div class="pq-intro">
-        <h2>Built for a threat most blockchains ignore</h2>
-        <p>Bitcoin, Ethereum, and nearly every other chain sign transactions using elliptic-curve cryptography — secure against ordinary computers, but not against a sufficiently powerful quantum computer. That's not a hypothetical: adversaries can record public blockchain data <em>today</em> and decrypt it once the hardware catches up, a strategy known as "harvest now, decrypt later."</p>
-        <p>Quantum-Lattice signs every transaction with <b>ML-DSA-65</b> — the finalized NIST post-quantum standard (FIPS 204) — built specifically to resist both classical and quantum attacks.</p>
+      <div class="pq-intro-row">
+        <div class="pq-intro">
+          <h2>Built for a threat most blockchains ignore</h2>
+          <p>Bitcoin, Ethereum, and nearly every other chain sign transactions using elliptic-curve cryptography — secure against ordinary computers, but not against a sufficiently powerful quantum computer. That's not a hypothetical: adversaries can record public blockchain data <em>today</em> and decrypt it once the hardware catches up, a strategy known as "harvest now, decrypt later."</p>
+          <p>Quantum-Lattice signs every transaction with <b>ML-DSA-65</b> — the finalized NIST post-quantum standard (FIPS 204) — built specifically to resist both classical and quantum attacks.</p>
+        </div>
+        <a class="pool-side-card" href="https://ql-pool.futuristicai.co.za" target="_blank" rel="noopener">
+          <div class="pool-side-mark"></div>
+          <div class="pool-side-title">Mining Pool Dashboard</div>
+          <div class="pool-side-sub">Live standings, hashrate, and payout history</div>
+          <div class="pool-side-cta">Open dashboard →</div>
+        </a>
       </div>
 
       <div class="pq-compare">
@@ -496,6 +567,18 @@
   <footer><a href="https://futuristicai.co.za" target="_blank" rel="noopener">FuturisticAI</a></footer>
 </div>
 
+<div id="block-modal-overlay" class="block-modal-overlay hidden">
+  <div class="block-modal">
+    <div class="block-modal-header">
+      <div class="eyebrow" id="modal-block-title">Block</div>
+      <button id="block-modal-close" class="modal-close">✕</button>
+    </div>
+    <div id="block-modal-body">
+      <div style="color: var(--text-faint); font-size: 13px; padding: 20px 0;">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <script>
   const $ = (id) => document.getElementById(id);
 
@@ -570,7 +653,7 @@
         const nodeClass = isNewest && isNew ? 'chain-node newest' : 'chain-node';
         const node =
           '<div class="chain-node-wrap">' +
-            '<div class="' + nodeClass + '">' +
+            '<div class="' + nodeClass + '" data-height="' + b.height + '">' +
               '<div class="h">#' + b.height + '</div>' +
               '<div class="t">' + shortHash(b.hash) + '</div>' +
               '<div class="tooltip">' +
@@ -594,6 +677,84 @@
   refreshChain();
   setInterval(refreshStats, 4000);
   setInterval(refreshChain, 4000);
+
+  // ---- Block detail modal ----
+  function truncateHex(h, front, back) {
+    if (!h || h.length <= front + back + 1) return h;
+    return h.slice(0, front) + '…' + h.slice(-back);
+  }
+
+  async function openBlockModal(height) {
+    const overlay = $('block-modal-overlay');
+    const body = $('block-modal-body');
+    $('modal-block-title').textContent = 'Block #' + height;
+    body.innerHTML = '<div style="color: var(--text-faint); font-size: 13px; padding: 20px 0;">Loading…</div>';
+    overlay.classList.remove('hidden');
+
+    try {
+      const res = await fetch('/api/block?height=' + height);
+      const rawText = await res.text();
+      let data = {};
+      try { data = JSON.parse(rawText); } catch (e) { data = { error: rawText }; }
+
+      if (!res.ok) throw new Error(data.error || 'Could not load that block.');
+
+      const date = new Date(data.timestamp * 1000);
+      let html = '';
+      html += '<div class="modal-row"><span class="k">Hash</span><span class="v">' + data.hash + '</span></div>';
+      html += '<div class="modal-row"><span class="k">Previous hash</span><span class="v">' + data.previous_hash + '</span></div>';
+      html += '<div class="modal-row"><span class="k">Timestamp</span><span class="v">' + date.toLocaleString() + '</span></div>';
+      html += '<div class="modal-row"><span class="k">Miner</span><span class="v">' + truncateHex(data.miner, 20, 12) + '</span></div>';
+      html += '<div class="modal-row"><span class="k">Nonce</span><span class="v">' + data.nonce + '</span></div>';
+      html += '<div class="modal-row"><span class="k">Transactions</span><span class="v">' + data.transactions.length + '</span></div>';
+
+      if (data.transactions.length > 0) {
+        html += '<div class="modal-tx-title">Transaction detail</div>';
+        data.transactions.forEach((tx, i) => {
+          html += '<div class="modal-tx">' +
+            '#' + (i + 1) + '<br>' +
+            'From: ' + truncateHex(tx.sender, 16, 8) + '<br>' +
+            'To: ' + truncateHex(tx.receiver, 16, 8) + '<br>' +
+            'Amount: <span class="amt">' + Number(tx.amount_ql).toLocaleString() + ' QL</span>' +
+          '</div>';
+        });
+      }
+
+      body.innerHTML = html;
+    } catch (e) {
+      body.innerHTML = '<div style="color: var(--danger); font-size: 13px; padding: 20px 0;">' + (e.message || 'Could not load that block.') + '</div>';
+    }
+  }
+
+  // Event delegation — chain-scroll's content is replaced on every
+  // refresh, so a listener on the container (rather than individual
+  // nodes) keeps working correctly even after re-renders.
+  $('chain-scroll').addEventListener('click', (e) => {
+    const node = e.target.closest('.chain-node');
+    if (node && node.dataset.height) {
+      openBlockModal(node.dataset.height);
+    }
+  });
+
+  $('block-modal-close').addEventListener('click', () => {
+    $('block-modal-overlay').classList.add('hidden');
+  });
+  $('block-modal-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'block-modal-overlay') {
+      $('block-modal-overlay').classList.add('hidden');
+    }
+  });
+
+  // ---- Block search ----
+  function searchBlock() {
+    const val = $('block-search-input').value.trim();
+    if (val === '' || isNaN(val) || Number(val) < 0) return;
+    openBlockModal(Number(val));
+  }
+  $('block-search-btn').addEventListener('click', searchBlock);
+  $('block-search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchBlock();
+  });
 
   // ---- Address lookup ----
   $('btn-lookup').addEventListener('click', async () => {
