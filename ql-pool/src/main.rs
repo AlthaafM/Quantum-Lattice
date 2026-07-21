@@ -358,6 +358,7 @@ struct PayoutRecord {
     timestamp: i64,
     total_paid_ql: f64,
     contributor_count: usize,
+    is_manual: bool,
 }
 
 struct SharedState {
@@ -367,6 +368,7 @@ struct SharedState {
     round_start_time: Mutex<i64>,
     all_time_blocks_found: Mutex<u64>,
     all_time_ql_distributed: Mutex<f64>,
+    all_time_manual_rewards: Mutex<u64>,
 }
 
 // ---------------------------------------------------------------------
@@ -508,7 +510,7 @@ fn handle_miner_connection(
             let _ = stream.write_all(resp.as_bytes());
         } else {
             println!("[POOL] TEST TRIGGER — manually processing current accumulated shares.");
-            process_payouts(&node_address, &state, pool_seed, pool_pk, pool_pk_hex);
+            process_payouts(&node_address, &state, pool_seed, pool_pk, pool_pk_hex, true);
             let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"status\":\"triggered\"}\r\n";
             let _ = stream.write_all(resp.as_bytes());
         }
@@ -523,6 +525,7 @@ fn handle_miner_connection(
         let round_start = *state.round_start_time.lock().unwrap();
         let all_time_blocks = *state.all_time_blocks_found.lock().unwrap();
         let all_time_ql = *state.all_time_ql_distributed.lock().unwrap();
+        let all_time_manual = *state.all_time_manual_rewards.lock().unwrap();
 
         let elapsed_secs = (chrono::Utc::now().timestamp() - round_start).max(1) as f64;
         let pool_difficulty_bits = template.as_ref().map(|t| t.pool_difficulty_bits).unwrap_or(20);
@@ -547,8 +550,8 @@ fn handle_miner_connection(
 
         let history_json: Vec<String> = history.iter().rev().map(|r| {
             format!(
-                "{{\"timestamp\":{},\"total_paid_ql\":{:.4},\"contributor_count\":{}}}",
-                r.timestamp, r.total_paid_ql, r.contributor_count
+                "{{\"timestamp\":{},\"total_paid_ql\":{:.4},\"contributor_count\":{},\"is_manual\":{}}}",
+                r.timestamp, r.total_paid_ql, r.contributor_count, r.is_manual
             )
         }).collect();
 
@@ -561,11 +564,12 @@ fn handle_miner_connection(
         };
 
         let json_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"pool_address\":\"{}\",\"round\":{},\"pool_hashrate\":{:.0},\"all_time_blocks_found\":{},\"all_time_ql_distributed\":{:.4},\"standings\":[{}],\"recent_payouts\":[{}]}}\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"pool_address\":\"{}\",\"round\":{},\"pool_hashrate\":{:.0},\"all_time_blocks_found\":{},\"all_time_manual_rewards\":{},\"all_time_ql_distributed\":{:.4},\"standings\":[{}],\"recent_payouts\":[{}]}}\r\n",
             pool_pk_hex,
             round_json,
             pool_hashrate,
             all_time_blocks,
+            all_time_manual,
             all_time_ql,
             standings_json.join(","),
             history_json.join(",")
@@ -651,7 +655,7 @@ fn submit_win_and_pay_out(node_address: &str, state: &Arc<SharedState>, pool_see
         return;
     }
     println!("[POOL] Real block submitted and accepted! Processing payouts...");
-    process_payouts(node_address, state, pool_seed, pool_pk, pool_pk_hex);
+    process_payouts(node_address, state, pool_seed, pool_pk, pool_pk_hex, false);
 }
 
 /// Distributes whatever's currently sitting in the pool's real balance,
@@ -659,7 +663,7 @@ fn submit_win_and_pay_out(node_address: &str, state: &Arc<SharedState>, pool_see
 /// after a genuine real-network win, and by the test-only trigger
 /// endpoint (which skips the block-submission step entirely, since
 /// there's no real winning nonce to submit in that case).
-fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8; 32], pool_pk: Vec<u8>, pool_pk_hex: String) {
+fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8; 32], pool_pk: Vec<u8>, pool_pk_hex: String, is_manual: bool) {
     // Snapshot and reset the round's shares atomically, so new shares
     // arriving during payout processing count toward the NEXT round, not
     // this one. Also mark a fresh start time here — this is genuinely
@@ -747,6 +751,7 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
             timestamp: chrono::Utc::now().timestamp(),
             total_paid_ql: available_ql,
             contributor_count,
+            is_manual,
         });
         if history.len() > 15 {
             let excess = history.len() - 15;
@@ -756,7 +761,14 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
 
     // Permanent, unbounded totals — distinct from the bounded history
     // above, since these should never lose data over the pool's lifetime.
-    *state.all_time_blocks_found.lock().unwrap() += 1;
+    // Genuine network wins and manually-initiated reward rounds are
+    // tracked as two separate, honestly-labeled counters, rather than
+    // blended into one number that would overstate real wins.
+    if is_manual {
+        *state.all_time_manual_rewards.lock().unwrap() += 1;
+    } else {
+        *state.all_time_blocks_found.lock().unwrap() += 1;
+    }
     *state.all_time_ql_distributed.lock().unwrap() += available_ql;
 }
 
@@ -794,6 +806,7 @@ fn main() {
         round_start_time: Mutex::new(chrono::Utc::now().timestamp()),
         all_time_blocks_found: Mutex::new(0),
         all_time_ql_distributed: Mutex::new(0.0),
+        all_time_manual_rewards: Mutex::new(0),
     });
 
     // Background thread: keeps the shared template current by periodically
