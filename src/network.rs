@@ -870,6 +870,22 @@ impl P2PNode {
                                 }
                             }
 
+                        } else if first_line.starts_with("GET /downloads/ql-wallet-windows-x64-setup.exe") {
+                            match fs::read("ql-wallet_0.1.0_x64-setup.exe") {
+                                Ok(bytes) => {
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"ql-wallet-windows-x64-setup.exe\"\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                                        bytes.len()
+                                    );
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    let _ = socket.write_all(&bytes).await;
+                                }
+                                Err(_) => {
+                                    let resp = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nDownload file not found on this node.\r\n";
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                }
+                            }
+
                         } else {
                             let html_content = fs::read_to_string("public_explorer.html")
                                 .unwrap_or_else(|_| "<h1>public_explorer.html missing</h1>".to_string());
