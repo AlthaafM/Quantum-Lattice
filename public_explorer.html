@@ -144,6 +144,8 @@
   }
   .wallet-card h3 { font-size: 22px; margin: 0 0 10px; }
   .wallet-card p { color: var(--text-dim); font-size: 14px; line-height: 1.6; margin: 0 0 24px; }
+  .wallet-cards-row { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+  .wallet-cards-row .wallet-card { flex: 1; min-width: 300px; max-width: 460px; }
   .btn-wallet {
     display: inline-block; padding: 14px 32px; border-radius: 12px; text-decoration: none;
     font-family: var(--display); font-weight: 700; font-size: 15px;
@@ -347,6 +349,14 @@
       <a href="#" data-tab-link="downloads">See mining options →</a>
     </div>
 
+    <div class="pool-banner">
+      <div class="left">
+        <span class="badge">New</span>
+        <p>Desktop Wallet is here — a real, installable app, same post-quantum security as the browser wallet. Windows may show a SmartScreen warning since it's new, unsigned software — click either "Keep" or "Run anyway" when prompted.</p>
+      </div>
+      <a href="/downloads/ql-wallet-windows-x64-setup.exe">⬇️ Download for Windows →</a>
+    </div>
+
     <div class="pq-section">
       <div class="pq-intro-row">
         <div class="pq-intro">
@@ -464,11 +474,20 @@
 
   <!-- ===== WALLET TAB ===== -->
   <div id="tab-wallet" class="hidden">
-    <div class="wallet-card">
-      <div class="mark-big"></div>
-      <h3>Quantum-Lattice Wallet</h3>
-      <p>Non-custodial, post-quantum secure. Your keys are generated and encrypted entirely on your own device — nobody else, including us, ever has access to them.</p>
-      <a class="btn-wallet" href="https://qlwallet.futuristicai.co.za" target="_blank" rel="noopener">Open the Wallet →</a>
+    <div class="wallet-cards-row">
+      <div class="wallet-card">
+        <div class="mark-big"></div>
+        <h3>Browser Wallet</h3>
+        <p>Non-custodial, post-quantum secure. Your keys are generated and encrypted entirely on your own device — nobody else, including us, ever has access to them.</p>
+        <a class="btn-wallet" href="https://qlwallet.futuristicai.co.za" target="_blank" rel="noopener">Open the Wallet →</a>
+      </div>
+      <div class="wallet-card">
+        <div class="mark-big"></div>
+        <h3>Desktop Wallet</h3>
+        <p>The same non-custodial, post-quantum wallet as a real, installable app. Mac and Android builds are on the way.</p>
+        <a class="btn-wallet" href="/downloads/ql-wallet-windows-x64-setup.exe">⬇️ Download for Windows →</a>
+        <p style="font-size:11.5px; color:var(--text-faint); margin-top:14px; margin-bottom:0;">Windows may show a SmartScreen warning since it's new, unsigned software — click either "Keep" or "Run anyway" when prompted.</p>
+      </div>
     </div>
   </div>
 
