@@ -525,6 +525,17 @@ fn handle_miner_connection(
         let round_start = *state.round_start_time.lock().unwrap();
         let all_time_blocks = *state.all_time_blocks_found.lock().unwrap();
         let all_time_ql = *state.all_time_ql_distributed.lock().unwrap();
+
+        // Real, current balance the pool is actually holding right now —
+        // whatever's sitting here is genuinely awaiting the next
+        // distribution, whether triggered by a real win or a manual round.
+        let pending_balance_ql: f64 = match http_get(&node_address, &format!("/api/balance?address={}", pool_pk_hex)) {
+            Some(resp) => {
+                let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+                extract_json_number(body, "balance_ql").unwrap_or(0) as f64
+            }
+            None => 0.0,
+        };
         let all_time_manual = *state.all_time_manual_rewards.lock().unwrap();
 
         let elapsed_secs = (chrono::Utc::now().timestamp() - round_start).max(1) as f64;
@@ -564,13 +575,14 @@ fn handle_miner_connection(
         };
 
         let json_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"pool_address\":\"{}\",\"round\":{},\"pool_hashrate\":{:.0},\"all_time_blocks_found\":{},\"all_time_manual_rewards\":{},\"all_time_ql_distributed\":{:.4},\"standings\":[{}],\"recent_payouts\":[{}]}}\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"pool_address\":\"{}\",\"round\":{},\"pool_hashrate\":{:.0},\"all_time_blocks_found\":{},\"all_time_manual_rewards\":{},\"all_time_ql_distributed\":{:.4},\"pending_balance_ql\":{:.4},\"standings\":[{}],\"recent_payouts\":[{}]}}\r\n",
             pool_pk_hex,
             round_json,
             pool_hashrate,
             all_time_blocks,
             all_time_manual,
             all_time_ql,
+            pending_balance_ql,
             standings_json.join(","),
             history_json.join(",")
         );
