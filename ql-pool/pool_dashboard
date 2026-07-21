@@ -16,6 +16,7 @@
     --lattice-b: #22d3c5;
     --success: #34d399;
     --danger: #f26d6d;
+    --warn: #f0b429;
     --text: #eae8f5;
     --text-dim: #8b87a8;
     --text-faint: #5b5878;
@@ -153,6 +154,11 @@
       <div class="stat-value" id="stat-total-distributed" style="color: var(--success);">-</div>
       <div class="stat-sub">QL, all-time</div>
     </div>
+    <div class="panel">
+      <div class="eyebrow"><span class="pulse-dot"></span>Pending Rewards</div>
+      <div class="stat-value" id="stat-pending-balance" style="color: var(--warn);">-</div>
+      <div class="stat-sub">QL awaiting next distribution</div>
+    </div>
   </div>
 
   <div class="join-card">
@@ -219,6 +225,7 @@
       $('stat-blocks-found').textContent = data.all_time_blocks_found.toLocaleString();
       $('stat-manual-rewards').textContent = data.all_time_manual_rewards.toLocaleString();
       $('stat-total-distributed').textContent = Number(data.all_time_ql_distributed).toLocaleString(undefined, {maximumFractionDigits: 2});
+      $('stat-pending-balance').textContent = Number(data.pending_balance_ql).toLocaleString(undefined, {maximumFractionDigits: 2});
 
       if (data.standings.length === 0) {
         $('standings-tbody').innerHTML = '<tr><td colspan="4" class="empty-row">No shares submitted yet this round.</td></tr>';
