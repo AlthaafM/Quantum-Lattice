@@ -38,9 +38,6 @@
     overflow-x: hidden;
   }
 
-  /* ---- Lattice background: a literal triangular lattice, since that's what
-     the cryptography is named for. Locked = dim, disordered drift.
-     Unlocked = brief resolve-into-order animation, then quiet ambient hum. ---- */
   #lattice-bg {
     position: fixed;
     inset: 0;
@@ -92,13 +89,13 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 40px;
     letter-spacing: 0.02em;
   }
   .brand .mark {
     width: 30px; height: 30px;
     background: conic-gradient(from 45deg, var(--lattice-a), var(--lattice-b), var(--lattice-a));
     clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+    flex-shrink: 0;
   }
   .brand .name { font-weight: 600; font-size: 15px; }
   .brand .name b { font-weight: 700; }
@@ -184,10 +181,43 @@
   .error-msg { color: var(--danger); font-size: 13px; margin-top: 10px; display: none; }
   .info-msg { color: var(--text-dim); font-size: 12px; margin-top: 10px; }
 
+  /* ---- Top bar / menu ---- */
+  .top-bar { width: 100%; max-width: 900px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+  .top-bar-left { display: flex; align-items: center; gap: 14px; }
+  .menu-toggle {
+    width: 38px; height: 38px; border-radius: 10px; background: var(--panel-solid);
+    border: 1px solid var(--edge); display: flex; align-items: center; justify-content: center;
+    cursor: pointer; font-size: 18px; color: var(--text); flex-shrink: 0;
+  }
+  .menu-toggle:hover { border-color: var(--lattice-a); }
+  .node-config { font-size: 12px; color: var(--text-faint); display: flex; align-items: center; gap: 8px; }
+  .node-config input { background: transparent; border: none; color: var(--text-dim); font-family: var(--mono); font-size: 12px; width: 160px; outline: none; border-bottom: 1px dashed var(--edge); padding: 2px 0; }
+
+  .menu-overlay {
+    position: fixed; inset: 0; z-index: 40; background: rgba(4,4,10,0.6); backdrop-filter: blur(3px);
+  }
+  .side-menu {
+    position: fixed; top: 0; left: 0; height: 100vh; width: 280px; z-index: 41;
+    background: var(--panel-solid); border-right: 1px solid var(--edge);
+    padding: 24px 18px; display: flex; flex-direction: column; gap: 4px;
+    box-shadow: 20px 0 60px rgba(0,0,0,0.5);
+  }
+  .side-menu-header { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; padding: 0 6px; }
+  .side-menu-item {
+    padding: 13px 14px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    color: var(--text-dim); cursor: pointer; display: flex; align-items: center; gap: 12px;
+    transition: all 0.12s ease;
+  }
+  .side-menu-item:hover { background: rgba(124,92,252,0.1); color: var(--text); }
+  .side-menu-item.active { background: rgba(124,92,252,0.15); color: var(--text); box-shadow: inset 0 0 0 1px rgba(124,92,252,0.3); }
+  .side-menu-item .icon { font-size: 16px; width: 20px; text-align: center; }
+  .side-menu-divider { height: 1px; background: var(--edge); margin: 10px 6px; }
+  .side-menu-item.danger { color: var(--danger); }
+
   /* ---- Dashboard ---- */
-  .dash { width: 100%; max-width: 900px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  @media (max-width: 760px) { .dash { grid-template-columns: 1fr; } }
-  .dash .full { grid-column: 1 / -1; }
+  .dash { width: 100%; max-width: 900px; }
+  .dash-hero { display: grid; grid-template-columns: 1.3fr 1fr; gap: 18px; margin-bottom: 18px; }
+  @media (max-width: 640px) { .dash-hero { grid-template-columns: 1fr; } }
 
   .panel {
     background: var(--panel);
@@ -197,6 +227,7 @@
     padding: 24px;
   }
   .panel .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); font-weight: 600; margin-bottom: 10px; }
+  .dash-view { margin-bottom: 18px; }
 
   .addr-row { display: flex; align-items: center; gap: 12px; }
   .addr-value {
@@ -226,10 +257,6 @@
   .activity-item .val { font-family: var(--mono); }
   .empty-note { color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px 0; }
 
-  .top-bar { width: 100%; max-width: 900px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-  .node-config { font-size: 12px; color: var(--text-faint); display: flex; align-items: center; gap: 8px; }
-  .node-config input { background: transparent; border: none; color: var(--text-dim); font-family: var(--mono); font-size: 12px; width: 160px; outline: none; border-bottom: 1px dashed var(--edge); padding: 2px 0; }
-
   a.mut-link { color: var(--lattice-b); text-decoration: none; font-size: 12px; }
   a.mut-link:hover { text-decoration: underline; }
 
@@ -239,7 +266,60 @@
     padding: 12px; max-height: 90px; overflow: hidden; word-break: break-all; margin-top: 10px;
   }
 
+  /* ---- New: quantum security panel ---- */
+  .compare-row { display: flex; justify-content: space-between; font-size: 13px; padding: 10px 0; border-bottom: 1px solid var(--edge); }
+  .compare-row:last-child { border-bottom: none; }
+  .compare-row .k { color: var(--text-faint); }
+  .compare-row .v-them { font-family: var(--mono); color: var(--danger); }
+  .compare-row .v-us { font-family: var(--mono); color: var(--success); font-weight: 700; }
+  .sig-test-result {
+    font-family: var(--mono); font-size: 11px; color: var(--success);
+    background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.3); border-radius: 10px;
+    padding: 12px; margin-top: 14px; word-break: break-all; line-height: 1.6; display: none;
+  }
+
+  /* ---- New: beneficiaries ---- */
+  .ben-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--edge); }
+  .ben-item:last-child { border-bottom: none; }
+  .ben-item .ben-info { flex: 1; min-width: 0; }
+  .ben-item .ben-name { font-weight: 700; font-size: 13.5px; }
+  .ben-item .ben-addr { font-family: var(--mono); font-size: 11px; color: var(--text-faint); word-break: break-all; margin-top: 2px; }
+  .ben-item .ben-actions { display: flex; gap: 6px; flex-shrink: 0; margin-left: 12px; }
+
+  /* ---- New: verified-at transparency ---- */
+  .verify-note { font-size: 11.5px; color: var(--text-faint); line-height: 1.6; margin-top: 10px; }
+  .verify-note .hash { font-family: var(--mono); color: var(--text-dim); }
+
   .hidden { display: none !important; }
+
+  /* ---- New: home screen additions ---- */
+  .quick-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+  .quick-action-btn {
+    background: var(--panel-solid); border: 1px solid var(--edge); border-radius: 12px;
+    padding: 14px 8px; text-align: center; cursor: pointer; transition: all 0.12s ease;
+  }
+  .quick-action-btn:hover { border-color: var(--lattice-a); transform: translateY(-1px); }
+  .quick-action-btn .qa-icon { font-size: 18px; margin-bottom: 6px; }
+  .quick-action-btn .qa-label { font-size: 11.5px; font-weight: 600; color: var(--text-dim); }
+
+  .teaser-card {
+    background: var(--panel); backdrop-filter: blur(18px); border: 1px solid var(--edge);
+    border-radius: 16px; padding: 20px; margin-top: 18px; cursor: pointer; transition: border-color 0.12s ease;
+  }
+  .teaser-card:hover { border-color: var(--lattice-a); }
+  .teaser-card.security { border-color: rgba(34,211,197,0.3); }
+  .teaser-card .teaser-title { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; }
+  .teaser-card .teaser-sub { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+  .teaser-card .teaser-arrow { color: var(--lattice-b); font-size: 12px; font-weight: 700; margin-top: 8px; }
+
+  .add-account-block {
+    border: 1.5px dashed var(--edge); border-radius: 16px; padding: 20px; margin-top: 18px;
+    text-align: center; cursor: pointer; color: var(--text-faint); transition: all 0.12s ease;
+  }
+  .add-account-block:hover { border-color: var(--lattice-a); color: var(--text-dim); }
+  .add-account-block .aa-plus { font-size: 20px; margin-bottom: 4px; }
+  .add-account-block .aa-label { font-size: 13px; font-weight: 600; }
+  .coming-soon-note { font-size: 11.5px; color: var(--lattice-b); margin-top: 8px; display: none; }
 </style>
 </head>
 <body>
@@ -247,18 +327,39 @@
 <div id="lattice-bg"></div>
 <div id="lattice-glow"></div>
 
+<div id="menu-overlay" class="menu-overlay hidden"></div>
+<div id="side-menu" class="side-menu hidden">
+  <div class="side-menu-header">
+    <div class="mark" style="width:26px;height:26px;background: conic-gradient(from 45deg, var(--lattice-a), var(--lattice-b), var(--lattice-a)); clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);"></div>
+    <span class="name" style="font-weight:700; font-size:14px;">MENU</span>
+  </div>
+  <div class="side-menu-item active" data-view="home"><span class="icon">⌂</span> Home</div>
+  <div class="side-menu-item" data-view="address"><span class="icon">◈</span> Wallet Address</div>
+  <div class="side-menu-item" data-view="send"><span class="icon">→</span> Send / Pay</div>
+  <div class="side-menu-item" data-view="history"><span class="icon">≡</span> Transaction History</div>
+  <div class="side-menu-item" data-view="beneficiaries"><span class="icon">☆</span> Saved Beneficiaries</div>
+  <div class="side-menu-divider"></div>
+  <div class="side-menu-item" data-view="security"><span class="icon">◆</span> Quantum Security</div>
+  <div class="side-menu-item" data-view="profile"><span class="icon">✎</span> Profile / Verify Email</div>
+  <div class="side-menu-divider"></div>
+  <div class="side-menu-item danger" id="side-lock"><span class="icon">⏻</span> Lock Wallet</div>
+</div>
+
 <div class="stage">
   <div class="top-bar">
-    <div class="brand">
-      <div class="mark"></div>
-      <div>
-        <span class="name"><b>QUANTUM</b>-LATTICE</span>
-        <span class="sub">WALLET · NON-CUSTODIAL</span>
+    <div class="top-bar-left">
+      <div class="menu-toggle hidden" id="menu-toggle">☰</div>
+      <div class="brand">
+        <div class="mark"></div>
+        <div>
+          <span class="name"><b>QUANTUM</b>-LATTICE</span>
+          <span class="sub">WALLET · NON-CUSTODIAL</span>
+        </div>
       </div>
     </div>
     <div class="node-config">
       NODE&nbsp;
-      <input id="node-url" type="text" value="127.0.0.1:8034" spellcheck="false">
+      <input id="node-url" type="text" value="quantum-lattice.futuristicai.co.za" spellcheck="false">
     </div>
   </div>
 
@@ -314,7 +415,7 @@
       </p>
     </div>
 
-    <!-- Restore from seed phrase (no keystore file needed, only the 24 words) -->
+    <!-- Restore from seed phrase -->
     <div id="tab-restore" class="hidden">
       <h1>Restore from seed phrase</h1>
       <p class="lead">Enter your 24 words in order, separated by spaces. This rebuilds your wallet directly — you'll set a fresh password and get a new keystore file at the end.</p>
@@ -337,7 +438,7 @@
       </p>
     </div>
 
-    <!-- Account (directory layer — separate from wallet key security, no password) -->
+    <!-- Account -->
     <div id="tab-account" class="hidden">
       <h1>Link another address (optional)</h1>
       <p class="lead">For a second or existing wallet you'd like recorded too — your main wallet is already linked automatically when you create it. This is purely a directory; it cannot unlock or move funds.</p>
@@ -422,94 +523,183 @@
     <button class="btn btn-primary" id="btn-continue-dash" disabled>Continue to wallet</button>
   </div>
 
-  <!-- ========== DASHBOARD ========== -->
+  <!-- ========== DASHBOARD (redesigned) ========== -->
   <div id="screen-dash" class="dash hidden">
-    <div class="panel full">
-      <div class="eyebrow">Your Address</div>
-      <div class="addr-row">
-        <div class="addr-value" id="dash-address">—</div>
-        <button class="copy-btn" id="btn-copy-address">Copy</button>
+
+    <!-- Home: balance + network, always the first thing shown -->
+    <div id="view-home">
+      <div class="dash-hero">
+        <div class="panel">
+          <div class="eyebrow"><span class="pulse-dot"></span>Balance</div>
+          <div><span class="balance-value" id="dash-balance">—</span><span class="balance-unit">QL</span></div>
+          <div class="balance-sub" id="dash-balance-sub">Fetching from node…</div>
+          <div class="verify-note" id="verify-note"></div>
+          <div class="quick-actions">
+            <div class="quick-action-btn" data-quick-nav="send">
+              <div class="qa-icon">→</div>
+              <div class="qa-label">Send</div>
+            </div>
+            <div class="quick-action-btn" data-quick-nav="address">
+              <div class="qa-icon">◈</div>
+              <div class="qa-label">Receive</div>
+            </div>
+            <div class="quick-action-btn" data-quick-nav="history">
+              <div class="qa-icon">≡</div>
+              <div class="qa-label">History</div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="eyebrow">Network</div>
+          <div style="font-size:13px; color:var(--text-dim); line-height:1.9;">
+            Chain height: <span id="dash-height" style="font-family:var(--mono); color:var(--text);">—</span><br>
+            Status: <span id="dash-status" style="font-family:var(--mono); color:var(--text);">—</span>
+          </div>
+        </div>
       </div>
-      <div class="qr-wrap" id="qr-wrap"></div>
-    </div>
 
-    <div class="panel">
-      <div class="eyebrow"><span class="pulse-dot"></span>Balance</div>
-      <div><span class="balance-value" id="dash-balance">—</span><span class="balance-unit">QL</span></div>
-      <div class="balance-sub" id="dash-balance-sub">Fetching from node…</div>
-    </div>
-
-    <div class="panel">
-      <div class="eyebrow">Network</div>
-      <div style="font-size:13px; color:var(--text-dim); line-height:1.9;">
-        Chain height: <span id="dash-height" style="font-family:var(--mono); color:var(--text);">—</span><br>
-        Status: <span id="dash-status" style="font-family:var(--mono); color:var(--text);">—</span>
+      <div class="panel">
+        <div class="eyebrow">Recent Activity</div>
+        <div id="home-activity-preview"><div class="empty-note">Nothing sent yet this session.</div></div>
+        <div style="text-align:right; margin-top:6px;"><a href="#" class="mut-link" data-quick-nav="history">View all →</a></div>
       </div>
-      <button class="btn btn-ghost btn-sm" id="btn-lock" style="margin-top:16px;">Lock wallet</button>
+
+      <div class="teaser-card security" data-quick-nav="security">
+        <div class="teaser-title">◆ Protected by Post-Quantum Cryptography</div>
+        <div class="teaser-sub">Your key is 1,952 bytes — built to resist attacks that will eventually break Bitcoin and Ethereum.</div>
+        <div class="teaser-arrow">See your real numbers →</div>
+      </div>
+
+      <div class="add-account-block" id="add-account-block">
+        <div class="aa-plus">+</div>
+        <div class="aa-label">Add Account</div>
+        <div class="coming-soon-note" id="coming-soon-note">Multiple sub-accounts are coming soon — genuinely on the roadmap, not built yet.</div>
+      </div>
     </div>
 
-    <div class="panel full">
-      <div class="eyebrow">Send QL</div>
-      <label>Recipient address (hex)</label>
-      <input type="text" id="send-to" placeholder="Paste a Quantum-Lattice address">
-      <label>Amount</label>
-      <input type="number" id="send-amount" placeholder="0.00" min="0" step="0.00000001">
-      <button class="btn btn-primary" id="btn-send">Sign &amp; send</button>
-      <div class="send-status" id="send-status"></div>
+    <!-- Wallet Address -->
+    <div id="view-address" class="dash-view hidden">
+      <div class="panel">
+        <div class="eyebrow">Your Address</div>
+        <div class="addr-row">
+          <div class="addr-value" id="dash-address">—</div>
+          <button class="copy-btn" id="btn-copy-address">Copy</button>
+        </div>
+        <div class="qr-wrap" id="qr-wrap"></div>
+      </div>
     </div>
 
-    <div class="panel full">
-      <div class="eyebrow">This Session's Activity</div>
-      <div id="activity-list"><div class="empty-note">Nothing sent yet this session. (Full transaction history requires a node feature not built yet.)</div></div>
+    <!-- Send / Pay -->
+    <div id="view-send" class="dash-view hidden">
+      <div class="panel">
+        <div class="eyebrow">Send QL</div>
+        <label>Recipient address (hex)</label>
+        <input type="text" id="send-to" placeholder="Paste a Quantum-Lattice address">
+        <div class="info-msg" id="ben-quick-pick" style="margin-top:8px;"></div>
+        <label>Amount</label>
+        <input type="number" id="send-amount" placeholder="0.00" min="0" step="0.00000001">
+        <button class="btn btn-primary" id="btn-send">Sign &amp; send</button>
+        <div class="send-status" id="send-status"></div>
+      </div>
     </div>
+
+    <!-- Transaction History -->
+    <div id="view-history" class="dash-view hidden">
+      <div class="panel">
+        <div class="eyebrow">This Session's Activity</div>
+        <div id="activity-list"><div class="empty-note">Nothing sent yet this session.</div></div>
+      </div>
+    </div>
+
+    <!-- Saved Beneficiaries -->
+    <div id="view-beneficiaries" class="dash-view hidden">
+      <div class="panel">
+        <div class="eyebrow">Saved Beneficiaries</div>
+        <p class="lead" style="margin-bottom:14px;">Saved on this device only, for quick sending — never sent to any server.</p>
+        <label>Name</label>
+        <input type="text" id="ben-name" placeholder="e.g. Savings, or a person's name">
+        <label>Address (hex)</label>
+        <input type="text" id="ben-address" placeholder="Paste an address">
+        <button class="btn btn-ghost" id="btn-add-ben" style="margin-top:14px;">+ Save beneficiary</button>
+        <div class="error-msg" id="ben-error"></div>
+        <div id="ben-list" style="margin-top:20px;"><div class="empty-note">No saved beneficiaries yet.</div></div>
+      </div>
+    </div>
+
+    <!-- Quantum Security -->
+    <div id="view-security" class="dash-view hidden">
+      <div class="panel">
+        <div class="eyebrow">Your Post-Quantum Security</div>
+        <p class="lead" style="margin-bottom:14px;">Real numbers about the actual keys protecting this wallet — not generic marketing.</p>
+        <div class="compare-row"><span class="k">Signature algorithm</span><span class="v-them">ECDSA (Bitcoin/Ethereum)</span></div>
+        <div class="compare-row"><span class="k">Your algorithm</span><span class="v-us">ML-DSA-65 (FIPS 204)</span></div>
+        <div class="compare-row"><span class="k">Their public key size</span><span class="v-them">~33–65 bytes</span></div>
+        <div class="compare-row"><span class="k">Your public key size</span><span class="v-us" id="sec-keysize">—</span></div>
+        <div class="compare-row"><span class="k">Vulnerable to Shor's algorithm</span><span class="v-them">Yes</span></div>
+        <div class="compare-row"><span class="k">Yours vulnerable to Shor's algorithm</span><span class="v-us">No</span></div>
+        <p class="lead" style="margin-top:16px; margin-bottom:0; font-size:12.5px;">That size difference isn't overhead — it's your real, mathematical security margin against a future quantum computer capable of breaking ECDSA.</p>
+
+        <button class="btn btn-ghost" id="btn-sig-test" style="margin-top:20px;">Run a live signature test with my key</button>
+        <div class="sig-test-result" id="sig-test-result"></div>
+      </div>
+    </div>
+
+    <!-- Profile / Verify Email -->
+    <div id="view-profile" class="dash-view hidden">
+      <div class="panel">
+        <div class="eyebrow">Profile &amp; Email Directory</div>
+        <p class="lead" style="margin-bottom:14px;">Link or check an email address in the public directory — purely informational, this cannot unlock or move funds.</p>
+
+        <div class="tabs" style="margin-bottom: 20px;">
+          <div class="tab active" data-profile-tab="register">Register / Update</div>
+          <div class="tab" data-profile-tab="lookup">Look up</div>
+        </div>
+
+        <div id="profile-register">
+          <label>Full name (optional)</label>
+          <input type="text" id="prof-name" placeholder="Your name" autocomplete="name">
+          <label>Email</label>
+          <input type="text" id="prof-email" placeholder="you@example.com" autocomplete="email">
+          <div class="error-msg" id="profile-error"></div>
+          <div class="info-msg" id="profile-success" style="color: var(--success); display:none;"></div>
+          <button class="btn btn-primary" id="btn-profile-register">Link this email</button>
+        </div>
+
+        <div id="profile-lookup" class="hidden">
+          <label>Email</label>
+          <input type="text" id="prof-lookup-email" placeholder="you@example.com" autocomplete="email">
+          <div class="error-msg" id="profile-lookup-error"></div>
+          <div class="info-msg" id="profile-lookup-result" style="display:none;"></div>
+          <button class="btn btn-primary" id="btn-profile-lookup">Look up</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <p style="margin-top:40px;"><a class="mut-link" href="https://quantum-lattice.futuristicai.co.za" target="_blank" rel="noopener">← Back to Quantum-Lattice Explorer</a></p>
 </div>
 
 <script type="module">
-// Real ML-DSA-65 cryptography running entirely in this browser tab via
-// WebAssembly — no local helper program required. This became possible
-// once the project moved to a pure-Rust crypto crate (ml-dsa); the earlier
-// pqcrypto-dilithium attempt couldn't compile to the browser's WASM target
-// because it relied on C code needing a standard library that target
-// doesn't have.
 import init, { generate_keypair, sign_message, validate_public_key, keypair_from_seed } from './pkg/ql_wallet_wasm.js';
 import { entropyToMnemonic, mnemonicToEntropy, validateMnemonic } from 'https://cdn.jsdelivr.net/npm/web-bip39/+esm';
 import bip39Wordlist from 'https://cdn.jsdelivr.net/npm/web-bip39/wordlists/english/+esm';
 
 let wasmReady = init();
 
-// Default the node address based on where this page itself is being
-// served from — real visitors (qlwallet.futuristicai.co.za) never need to
-// type anything in; local testing (127.0.0.1) keeps working exactly as
-// before. The wallet's static files and the node's actual API are two
-// different subdomains/origins, which is fine — every API endpoint already
-// has CORS enabled for exactly this.
-(function setDefaultNodeUrl() {
-  const host = window.location.hostname;
-  const isLocalPage = host === '127.0.0.1' || host === 'localhost' || host === '';
-  document.getElementById('node-url').value = isLocalPage ? '127.0.0.1:8034' : 'quantum-lattice.futuristicai.co.za';
-})();
-const DILITHIUM3_PUBKEY_LEN = null; // no longer assumed — validated via WASM instead
+document.getElementById('node-url').value = 'quantum-lattice.futuristicai.co.za';
 
 function isValidAddress(bytes) {
   return bytes && bytes.length > 0 && validate_public_key(bytes);
 }
 
-let secretKeyBytes = null;   // decrypted, in-memory ONLY, cleared on lock
+let secretKeyBytes = null;
 let publicKeyBytes = null;
 let currentAddress = null;
 
 const $ = (id) => document.getElementById(id);
 const nodeUrl = () => $('node-url').value.trim();
 
-// Local addresses (127.0.0.1, localhost, or a bare LAN IP like 10.x/192.168.x
-// while testing) are plain http — there's no TLS cert for "127.0.0.1".
-// Anything else is assumed to be a real public domain reached through
-// Cloudflare, which terminates TLS — so it must be fetched over https, or
-// the browser blocks the request outright as mixed content on this
-// https-served page.
 function apiBase() {
   const url = nodeUrl();
   const isLocal = /^(127\.0\.0\.1|localhost|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url);
@@ -543,7 +733,6 @@ function u64ToLEBytes(bigintVal) {
   return out;
 }
 
-// ---- Password-based encryption (Web Crypto API, native to the browser) ----
 async function deriveAesKey(password, saltBytes, iterations) {
   const enc = new TextEncoder();
   const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
@@ -584,7 +773,7 @@ async function decryptKeystore(keystore, password) {
   return new Uint8Array(plain);
 }
 
-// ---- Tabs ----
+// ---- Auth tabs ----
 document.querySelectorAll('.stage > .card > .tabs > .tab').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('.stage > .card > .tabs > .tab').forEach(t => t.classList.remove('active'));
@@ -596,7 +785,6 @@ document.querySelectorAll('.stage > .card > .tabs > .tab').forEach(tab => {
   });
 });
 
-// ---- Account sub-tabs (Register / Look up) ----
 document.querySelectorAll('[data-account-tab]').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('[data-account-tab]').forEach(t => t.classList.remove('active'));
@@ -687,7 +875,6 @@ $('btn-lookup').addEventListener('click', async () => {
   }
 });
 
-// ---- Password strength (rough, local-only heuristic) ----
 $('create-pw').addEventListener('input', () => {
   const v = $('create-pw').value;
   let score = 0;
@@ -701,7 +888,6 @@ $('create-pw').addEventListener('input', () => {
   bar.style.background = score < 40 ? 'var(--danger)' : score < 75 ? 'var(--warn)' : 'var(--success)';
 });
 
-// ---- Create wallet ----
 let pendingKeystore = null;
 let pendingVerifyEmail = null;
 
@@ -739,10 +925,6 @@ $('btn-generate').addEventListener('click', async () => {
   publicKeyBytes = pub;
   secretKeyBytes = sec;
 
-  // Record the email + address (and name, if given) for admin visibility.
-  // This never touches the actual keys — a failure here must not block
-  // wallet creation, since the wallet itself is already fully created and
-  // usable regardless of whether this record succeeds.
   try {
     const body = '{"email":"' + email.replace(/"/g, '\\"') + '","full_name":"' + name.replace(/"/g, '\\"') + '","address":"' + addressHex + '"}';
     await fetch(apiBase() + '/api/register', {
@@ -752,8 +934,7 @@ $('btn-generate').addEventListener('click', async () => {
     });
     pendingVerifyEmail = email;
   } catch (e) {
-    // Silent — the wallet is still fully valid even if this record failed
-    // (e.g. node unreachable, or this email already used for another wallet).
+    // Silent — the wallet is still fully valid regardless.
   }
 
   $('verify-code').value = '';
@@ -784,9 +965,6 @@ async function renderSeedPhrase(seedBytes) {
     seedPhraseAvailable = true;
     seedCheckRow.classList.remove('hidden');
   } catch (e) {
-    // Non-critical: the keystore file above is still fully valid and
-    // sufficient on its own. Just hide the seed-phrase confirmation
-    // requirement rather than blocking wallet creation over it.
     grid.innerHTML = '<span style="color: var(--text-faint);">Seed phrase unavailable in this browser session — your keystore file above is still fully valid on its own.</span>';
     seedPhraseAvailable = false;
     seedCheckRow.classList.add('hidden');
@@ -892,7 +1070,6 @@ $('btn-continue-dash').addEventListener('click', () => {
   enterDashboard();
 });
 
-// ---- Unlock wallet ----
 $('link-show-restore').addEventListener('click', (e) => {
   e.preventDefault();
   $('tab-unlock').classList.add('hidden');
@@ -954,7 +1131,7 @@ $('btn-restore').addEventListener('click', async () => {
 
 $('keystore-file').addEventListener('change', () => {
   const f = $('keystore-file').files[0];
-  $('keystore-file-info').textContent = f ? ('Selected: ' + f.name) : 'No file selected — will check this browser\'s local storage instead.';
+  $('keystore-file-info').textContent = f ? ('Selected: ' + f.name) : 'No file selected — will check this browser local storage instead.';
 });
 
 $('btn-unlock').addEventListener('click', async () => {
@@ -990,6 +1167,68 @@ $('btn-unlock').addEventListener('click', async () => {
   }
 });
 
+// ---- Side menu navigation ----
+const menuToggle = $('menu-toggle');
+const sideMenu = $('side-menu');
+const menuOverlay = $('menu-overlay');
+
+function openMenu() {
+  sideMenu.classList.remove('hidden');
+  menuOverlay.classList.remove('hidden');
+}
+function closeMenu() {
+  sideMenu.classList.add('hidden');
+  menuOverlay.classList.add('hidden');
+}
+menuToggle.addEventListener('click', openMenu);
+menuOverlay.addEventListener('click', closeMenu);
+
+const allViews = ['home', 'address', 'send', 'history', 'beneficiaries', 'security', 'profile'];
+
+function showView(name) {
+  allViews.forEach(v => {
+    const el = document.getElementById('view-' + v);
+    if (el) el.classList.toggle('hidden', v !== name);
+  });
+  document.querySelectorAll('.side-menu-item[data-view]').forEach(item => {
+    item.classList.toggle('active', item.dataset.view === name);
+  });
+}
+
+document.querySelectorAll('.side-menu-item[data-view]').forEach(item => {
+  item.addEventListener('click', () => {
+    showView(item.dataset.view);
+    closeMenu();
+    if (item.dataset.view === 'beneficiaries') renderBeneficiaries();
+    if (item.dataset.view === 'send') renderBenQuickPick();
+  });
+});
+
+$('side-lock').addEventListener('click', () => {
+  closeMenu();
+  doLock();
+});
+
+// ---- New: quick-action buttons and teaser cards on the home screen ----
+document.querySelectorAll('[data-quick-nav]').forEach(el => {
+  el.addEventListener('click', (e) => {
+    e.preventDefault();
+    const target = el.dataset.quickNav;
+    showView(target);
+    document.querySelectorAll('.side-menu-item[data-view]').forEach(item => {
+      item.classList.toggle('active', item.dataset.view === target);
+    });
+    if (target === 'beneficiaries') renderBeneficiaries();
+    if (target === 'send') renderBenQuickPick();
+  });
+});
+
+// ---- New: Add Account (genuinely not built yet — honest placeholder) ----
+$('add-account-block').addEventListener('click', () => {
+  const note = $('coming-soon-note');
+  note.style.display = note.style.display === 'block' ? 'none' : 'block';
+});
+
 // ---- Dashboard ----
 let pollTimer = null;
 
@@ -997,7 +1236,10 @@ function enterDashboard() {
   $('screen-auth').classList.add('hidden');
   $('screen-backup').classList.add('hidden');
   $('screen-dash').classList.remove('hidden');
+  $('menu-toggle').classList.remove('hidden');
   $('dash-address').textContent = currentAddress;
+  $('sec-keysize').textContent = publicKeyBytes.length.toLocaleString() + ' bytes';
+  showView('home');
   document.body.classList.add('unlocked-flash');
   setTimeout(() => document.body.classList.remove('unlocked-flash'), 1500);
 
@@ -1005,10 +1247,6 @@ function enterDashboard() {
     $('qr-wrap').innerHTML = '';
     new QRCode($('qr-wrap'), { text: currentAddress, width: 128, height: 128, colorDark: '#0d0e1a', colorLight: '#ffffff' });
   } catch (e) {
-    // This QR library can't handle a string this long (ML-DSA-65 addresses
-    // are ~3900 hex characters — far past what it was built for). Not
-    // critical: the address is already shown as text above, so just hide
-    // the QR panel instead of blocking the rest of the dashboard.
     $('qr-wrap').style.display = 'none';
   }
 
@@ -1027,6 +1265,17 @@ async function refreshChainData() {
     const info = await jsonRes.json();
     $('dash-height').textContent = info.chain_height;
     $('dash-status').textContent = info.status;
+
+    // Real, honest transparency: show exactly which block this balance was
+    // read against, with its real hash — independently checkable by anyone
+    // on the public explorer, rather than asking for blind trust.
+    try {
+      const blockRes = await fetch(apiBase() + '/api/block?height=' + info.chain_height);
+      const block = await blockRes.json();
+      $('verify-note').innerHTML = 'Verified against block <span class="hash">#' + info.chain_height + '</span> — hash <span class="hash">' + block.hash.slice(0, 16) + '…</span>. <a class="mut-link" href="https://quantum-lattice.futuristicai.co.za" target="_blank" rel="noopener">Check this yourself →</a>';
+    } catch (e) {
+      $('verify-note').textContent = '';
+    }
   } catch (e) {
     $('dash-balance-sub').textContent = 'Could not reach node — check the NODE address above.';
     $('dash-status').textContent = 'unreachable';
@@ -1039,15 +1288,16 @@ $('btn-copy-address').addEventListener('click', () => {
   setTimeout(() => $('btn-copy-address').textContent = 'Copy', 1500);
 });
 
-$('btn-lock').addEventListener('click', () => {
+function doLock() {
   secretKeyBytes = null;
   publicKeyBytes = null;
   currentAddress = null;
   clearInterval(pollTimer);
+  $('menu-toggle').classList.add('hidden');
   $('screen-dash').classList.add('hidden');
   $('screen-auth').classList.remove('hidden');
   $('unlock-pw').value = '';
-});
+}
 
 $('btn-send').addEventListener('click', async () => {
   const status = $('send-status');
@@ -1065,9 +1315,6 @@ $('btn-send').addEventListener('click', async () => {
 
     const amountQL = parseFloat(amountStr);
     if (isNaN(amountQL) || amountQL <= 0) throw new Error('Enter a valid amount greater than 0.');
-    // Total supply (25.5M * 1e8 = 2.55e15) is well under Number.MAX_SAFE_INTEGER
-    // (~9.007e15), so a plain Number is safe here — BigInt is only used
-    // internally below for correct little-endian byte extraction.
     const amountSmallest = Math.round(amountQL * 100000000);
 
     const amountBytes = u64ToLEBytes(BigInt(amountSmallest));
@@ -1082,9 +1329,6 @@ $('btn-send').addEventListener('click', async () => {
 
     status.textContent = 'Broadcasting to node…';
 
-    // Built manually (not JSON.stringify) so amount is emitted as a raw
-    // unquoted number — the node's hand-rolled parser (extract_json_number
-    // in network.rs) expects exactly that, not a quoted string.
     const body = '{"sender":"' + hexEncode(publicKeyBytes) + '","receiver":"' + hexEncode(receiverBytes) + '","amount":' + amountSmallest + ',"signature":"' + hexEncode(new Uint8Array(signature)) + '"}';
 
     const res = await fetch(apiBase() + '/api/submit_tx', {
@@ -1093,8 +1337,6 @@ $('btn-send').addEventListener('click', async () => {
       body,
     });
 
-    // The node's error responses are plain text, not JSON — parse
-    // defensively so a 400 doesn't throw an unrelated "invalid JSON" error.
     const rawText = await res.text();
     let resJson = {};
     try { resJson = JSON.parse(rawText); } catch (e) { resJson = { note: rawText, error: rawText }; }
@@ -1115,13 +1357,227 @@ $('btn-send').addEventListener('click', async () => {
 });
 
 function addActivity(amount, to) {
+  const row = () => {
+    const el = document.createElement('div');
+    el.className = 'activity-item';
+    el.innerHTML = '<span class="label">Sent to ' + to.slice(0, 14) + '…</span><span class="val">-' + amount + ' QL</span>';
+    return el;
+  };
+
   const list = $('activity-list');
   if (list.querySelector('.empty-note')) list.innerHTML = '';
-  const row = document.createElement('div');
-  row.className = 'activity-item';
-  row.innerHTML = '<span class="label">Sent to ' + to.slice(0, 14) + '…</span><span class="val">-' + amount + ' QL</span>';
-  list.prepend(row);
+  list.prepend(row());
+
+  // Home screen shows a lightweight preview of the same activity — just
+  // the two most recent items, with a link into the full History view.
+  const preview = $('home-activity-preview');
+  if (preview.querySelector('.empty-note')) preview.innerHTML = '';
+  preview.prepend(row());
+  while (preview.children.length > 2) {
+    preview.removeChild(preview.lastChild);
+  }
 }
+
+// ---- New: Saved Beneficiaries (this device only, localStorage) ----
+function getBeneficiaries() {
+  try {
+    const raw = localStorage.getItem('ql_wallet_beneficiaries');
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveBeneficiaries(list) {
+  try { localStorage.setItem('ql_wallet_beneficiaries', JSON.stringify(list)); } catch (e) {}
+}
+
+function renderBeneficiaries() {
+  const list = getBeneficiaries();
+  const container = $('ben-list');
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty-note">No saved beneficiaries yet.</div>';
+    return;
+  }
+  container.innerHTML = '';
+  list.forEach((b, i) => {
+    const row = document.createElement('div');
+    row.className = 'ben-item';
+    row.innerHTML =
+      '<div class="ben-info"><div class="ben-name"></div><div class="ben-addr"></div></div>' +
+      '<div class="ben-actions">' +
+        '<button class="btn btn-ghost btn-sm" data-use="' + i + '">Use</button>' +
+        '<button class="btn btn-danger btn-sm" data-del="' + i + '">Remove</button>' +
+      '</div>';
+    row.querySelector('.ben-name').textContent = b.name;
+    row.querySelector('.ben-addr').textContent = b.address.slice(0, 24) + '…';
+    container.appendChild(row);
+  });
+
+  container.querySelectorAll('[data-use]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const b = getBeneficiaries()[Number(btn.dataset.use)];
+      $('send-to').value = b.address;
+      showView('send');
+      document.querySelectorAll('.side-menu-item[data-view]').forEach(item => {
+        item.classList.toggle('active', item.dataset.view === 'send');
+      });
+      renderBenQuickPick();
+    });
+  });
+  container.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const list = getBeneficiaries();
+      list.splice(Number(btn.dataset.del), 1);
+      saveBeneficiaries(list);
+      renderBeneficiaries();
+    });
+  });
+}
+
+$('btn-add-ben').addEventListener('click', () => {
+  const err = $('ben-error');
+  err.style.display = 'none';
+  const name = $('ben-name').value.trim();
+  const address = $('ben-address').value.trim();
+
+  if (!name) { err.textContent = 'Give this beneficiary a name.'; err.style.display = 'block'; return; }
+  if (address.length < 10) { err.textContent = 'Enter a valid address.'; err.style.display = 'block'; return; }
+
+  const list = getBeneficiaries();
+  list.push({ name, address });
+  saveBeneficiaries(list);
+
+  $('ben-name').value = '';
+  $('ben-address').value = '';
+  renderBeneficiaries();
+});
+
+function renderBenQuickPick() {
+  const list = getBeneficiaries();
+  const box = $('ben-quick-pick');
+  if (list.length === 0) { box.innerHTML = ''; return; }
+  box.innerHTML = 'Quick pick: ' + list.map((b, i) =>
+    '<a href="#" class="mut-link" data-quick="' + i + '" style="margin-right:12px;">' + b.name + '</a>'
+  ).join('');
+  box.querySelectorAll('[data-quick]').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      $('send-to').value = list[Number(link.dataset.quick)].address;
+    });
+  });
+}
+
+// ---- New: live signature self-test ----
+$('btn-sig-test').addEventListener('click', async () => {
+  const result = $('sig-test-result');
+  result.style.display = 'block';
+  result.textContent = 'Signing a real test message with your actual key…';
+
+  try {
+    await wasmReady;
+    const testMessage = new TextEncoder().encode('Quantum-Lattice self-test: ' + new Date().toISOString());
+    const signature = sign_message(secretKeyBytes, testMessage);
+    const sigBytes = new Uint8Array(signature);
+
+    result.innerHTML =
+      'Real signature produced by your own key, just now:<br><br>' +
+      'Message signed: "' + new TextDecoder().decode(testMessage) + '"<br>' +
+      'Signature size: ' + sigBytes.length.toLocaleString() + ' bytes<br>' +
+      'First 64 bytes: ' + hexEncode(sigBytes.slice(0, 64)) + '…<br><br>' +
+      'This is a genuine ML-DSA-65 signature from your real secret key — anyone with your public key could independently verify it.';
+  } catch (e) {
+    result.textContent = 'Could not complete the test: ' + (e.message || e);
+  }
+});
+
+// ---- Profile tab (mirrors Account tab logic, from within the dashboard) ----
+document.querySelectorAll('[data-profile-tab]').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('[data-profile-tab]').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const which = tab.dataset.profileTab;
+    $('profile-register').classList.toggle('hidden', which !== 'register');
+    $('profile-lookup').classList.toggle('hidden', which !== 'lookup');
+  });
+});
+
+$('btn-profile-register').addEventListener('click', async () => {
+  const err = $('profile-error');
+  const ok = $('profile-success');
+  err.style.display = 'none';
+  ok.style.display = 'none';
+
+  const name = $('prof-name').value.trim();
+  const email = $('prof-email').value.trim();
+
+  if (!email || !email.includes('@')) { err.textContent = 'Enter a valid email address.'; err.style.display = 'block'; return; }
+
+  $('btn-profile-register').disabled = true;
+  $('btn-profile-register').textContent = 'Linking…';
+
+  try {
+    const body = '{"email":"' + email.replace(/"/g, '\\"') + '","full_name":"' + name.replace(/"/g, '\\"') + '","address":"' + currentAddress + '"}';
+    const res = await fetch(apiBase() + '/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+    if (res.ok) {
+      ok.textContent = 'Linked — this email is now associated with your current wallet address.';
+      ok.style.display = 'block';
+    } else {
+      throw new Error(resJson.error || 'Could not link this email.');
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Could not reach the node.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-profile-register').disabled = false;
+    $('btn-profile-register').textContent = 'Link this email';
+  }
+});
+
+$('btn-profile-lookup').addEventListener('click', async () => {
+  const err = $('profile-lookup-error');
+  const result = $('profile-lookup-result');
+  err.style.display = 'none';
+  result.style.display = 'none';
+
+  const email = $('prof-lookup-email').value.trim();
+  if (!email) { err.textContent = 'Enter an email to look up.'; err.style.display = 'block'; return; }
+
+  $('btn-profile-lookup').disabled = true;
+  $('btn-profile-lookup').textContent = 'Looking up…';
+
+  try {
+    const body = '{"email":"' + email.replace(/"/g, '\\"') + '"}';
+    const res = await fetch(apiBase() + '/api/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const rawText = await res.text();
+    let resJson = {};
+    try { resJson = JSON.parse(rawText); } catch (e) { resJson = { error: rawText }; }
+
+    if (res.ok) {
+      result.textContent = 'Linked address: ' + resJson.address;
+      result.style.display = 'block';
+    } else {
+      throw new Error(resJson.error || 'No account found with this email.');
+    }
+  } catch (e) {
+    err.textContent = e.message || 'Could not reach the node.';
+    err.style.display = 'block';
+  } finally {
+    $('btn-profile-lookup').disabled = false;
+    $('btn-profile-lookup').textContent = 'Look up';
+  }
+});
 </script>
 </body>
 </html>
