@@ -555,9 +555,9 @@ impl P2PNode {
                                     let eng = engine_clone.lock().await;
                                     let balance = eng.balance_of(&pk_bytes);
                                     format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"address\":\"{}\",\"balance_ql\":{}}}\r\n",
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"address\":\"{}\",\"balance_ql\":{:.8}}}\r\n",
                                         address_hex,
-                                        balance / COIN
+                                        balance as f64 / COIN as f64
                                     )
                                 }
                                 Err(_) => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nInvalid hex address\r\n".to_string(),
