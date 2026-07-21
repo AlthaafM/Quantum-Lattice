@@ -241,6 +241,13 @@
   }
   .pool-banner a:hover { text-decoration: underline; }
 
+  .bonus-banner {
+    text-align: center; padding: 14px 20px; margin-bottom: 18px; border-radius: 14px;
+    background: linear-gradient(135deg, rgba(124,92,252,0.12), rgba(34,211,197,0.12));
+    border: 1px solid rgba(124,92,252,0.3); font-size: 14px; font-weight: 700; color: var(--text);
+  }
+  .bonus-banner span { color: var(--lattice-b); }
+
   .cmd-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 28px; }
   @media (max-width: 700px) { .cmd-compare { grid-template-columns: 1fr; } }
   .cmd-card { background: var(--panel); backdrop-filter: blur(18px); border: 1px solid var(--edge); border-radius: 16px; padding: 22px; }
@@ -326,6 +333,10 @@
         <input type="number" id="block-search-input" placeholder="Jump to block #" min="0">
         <button id="block-search-btn">View block</button>
       </div>
+    </div>
+
+    <div class="bonus-banner">
+      ⚡ Pool contributors may also receive <span>manually-initiated bonus rewards</span> from time to time — on top of genuine network wins.
     </div>
 
     <div class="pool-banner">
