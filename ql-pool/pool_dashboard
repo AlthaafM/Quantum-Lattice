@@ -141,7 +141,12 @@
     <div class="panel">
       <div class="eyebrow">Blocks Found</div>
       <div class="stat-value" id="stat-blocks-found" style="color: var(--success);">-</div>
-      <div class="stat-sub">All-time</div>
+      <div class="stat-sub">Genuine network wins, all-time</div>
+    </div>
+    <div class="panel">
+      <div class="eyebrow">Manual Rewards</div>
+      <div class="stat-value" id="stat-manual-rewards" style="color: var(--lattice-a);">-</div>
+      <div class="stat-sub">Bonus rounds, all-time</div>
     </div>
     <div class="panel">
       <div class="eyebrow">Total Distributed</div>
@@ -152,7 +157,7 @@
 
   <div class="join-card">
     <h3>Join the pool</h3>
-    <p>Same miner you already have, just a different command. Rewards are paid directly to your own wallet address whenever the pool wins.</p>
+    <p>Same miner you already have, just a different command. Rewards are paid directly to your own wallet address whenever the pool wins — and from time to time, contributors may also receive a manually-initiated bonus reward, on top of genuine network wins.</p>
     <div class="cmd-block"><span class="lbl">Linux</span>./miner --pool ql-pool.futuristicai.co.za:7999 YOUR_WALLET_ADDRESS</div>
     <div class="cmd-block"><span class="lbl">Windows</span>.\miner.exe --pool ql-pool.futuristicai.co.za:7999 YOUR_WALLET_ADDRESS</div>
   </div>
@@ -170,9 +175,9 @@
   <div class="section-title">Recent payouts</div>
   <div class="card">
     <table>
-      <thead><tr><th>When</th><th>Total Paid</th><th>Contributors</th></tr></thead>
+      <thead><tr><th>When</th><th>Total Paid</th><th>Contributors</th><th>Type</th></tr></thead>
       <tbody id="payouts-tbody">
-        <tr><td colspan="3" class="empty-row">Loading</td></tr>
+        <tr><td colspan="4" class="empty-row">Loading</td></tr>
       </tbody>
     </table>
   </div>
@@ -212,6 +217,7 @@
       $('stat-contributors').textContent = data.standings.length;
       $('stat-hashrate').textContent = formatHashrate(data.pool_hashrate);
       $('stat-blocks-found').textContent = data.all_time_blocks_found.toLocaleString();
+      $('stat-manual-rewards').textContent = data.all_time_manual_rewards.toLocaleString();
       $('stat-total-distributed').textContent = Number(data.all_time_ql_distributed).toLocaleString(undefined, {maximumFractionDigits: 2});
 
       if (data.standings.length === 0) {
@@ -223,10 +229,10 @@
       }
 
       if (data.recent_payouts.length === 0) {
-        $('payouts-tbody').innerHTML = '<tr><td colspan="3" class="empty-row">No payouts recorded yet.</td></tr>';
+        $('payouts-tbody').innerHTML = '<tr><td colspan="4" class="empty-row">No payouts recorded yet.</td></tr>';
       } else {
         $('payouts-tbody').innerHTML = data.recent_payouts.map(p =>
-          '<tr><td>' + timeAgo(p.timestamp) + '</td><td>' + Number(p.total_paid_ql).toLocaleString(undefined, {maximumFractionDigits: 4}) + ' QL</td><td>' + p.contributor_count + '</td></tr>'
+          '<tr><td>' + timeAgo(p.timestamp) + '</td><td>' + Number(p.total_paid_ql).toLocaleString(undefined, {maximumFractionDigits: 4}) + ' QL</td><td>' + p.contributor_count + '</td><td>' + (p.is_manual ? 'Bonus reward' : 'Network win') + '</td></tr>'
         ).join('');
       }
     } catch (e) {
