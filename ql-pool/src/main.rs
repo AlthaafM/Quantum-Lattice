@@ -190,6 +190,20 @@ fn extract_json_number(body: &str, key: &str) -> Option<u64> {
     after_colon[..end].trim().parse::<u64>().ok()
 }
 
+/// Same as extract_json_number, but for genuine decimal values — the
+/// node's /api/balance now correctly returns full-precision QL amounts
+/// (e.g. "48.00000000") rather than a truncated whole number, so anything
+/// reading a real balance needs this, not the integer-only parser above.
+fn extract_json_float(body: &str, key: &str) -> Option<f64> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = body.find(&pattern)?;
+    let after_key = &body[key_pos + pattern.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+    let end = after_colon.find(|c: char| c == ',' || c == '}').unwrap_or(after_colon.len());
+    after_colon[..end].trim().parse::<f64>().ok()
+}
+
 fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
@@ -532,7 +546,7 @@ fn handle_miner_connection(
         let pending_balance_ql: f64 = match http_get(&node_address, &format!("/api/balance?address={}", pool_pk_hex)) {
             Some(resp) => {
                 let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
-                extract_json_number(body, "balance_ql").unwrap_or(0) as f64
+                extract_json_float(body, "balance_ql").unwrap_or(0.0)
             }
             None => 0.0,
         };
@@ -707,8 +721,8 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
         None => { println!("[POOL] Could not check the pool's own balance — aborting payout."); return; }
     };
     let balance_body = balance_response.split("\r\n\r\n").nth(1).unwrap_or("");
-    let available_ql = match extract_json_number(balance_body, "balance_ql") {
-        Some(b) => b as f64,
+    let available_ql = match extract_json_float(balance_body, "balance_ql") {
+        Some(b) => b,
         None => { println!("[POOL] Could not parse the pool's balance — aborting payout."); return; }
     };
 
@@ -782,6 +796,8 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
         *state.all_time_blocks_found.lock().unwrap() += 1;
     }
     *state.all_time_ql_distributed.lock().unwrap() += available_ql;
+
+    save_persistent_state(state);
 }
 
 fn print_usage_and_exit() -> ! {
@@ -795,6 +811,76 @@ fn print_usage_and_exit() -> ! {
     eprintln!("Example:");
     eprintln!("  pool quantum-lattice.futuristicai.co.za:8034 7999");
     std::process::exit(1);
+}
+
+/// Loads the pool's permanent stats from disk, if a save file exists —
+/// without this, "all-time" data would only ever live in memory and
+/// silently reset to zero on every restart, which would be misleading
+/// given the dashboard explicitly labels these numbers as permanent.
+fn load_persistent_state(state: &Arc<SharedState>) {
+    let content = match std::fs::read_to_string("pool_state.txt") {
+        Ok(c) => c,
+        Err(_) => { println!("[POOL] No saved state file found — starting fresh all-time stats."); return; }
+    };
+
+    let mut history: Vec<PayoutRecord> = Vec::new();
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("all_time_blocks_found=") {
+            if let Ok(v) = rest.trim().parse::<u64>() {
+                *state.all_time_blocks_found.lock().unwrap() = v;
+            }
+        } else if let Some(rest) = line.strip_prefix("all_time_manual_rewards=") {
+            if let Ok(v) = rest.trim().parse::<u64>() {
+                *state.all_time_manual_rewards.lock().unwrap() = v;
+            }
+        } else if let Some(rest) = line.strip_prefix("all_time_ql_distributed=") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                *state.all_time_ql_distributed.lock().unwrap() = v;
+            }
+        } else if let Some(rest) = line.strip_prefix("payout|") {
+            let parts: Vec<&str> = rest.split('|').collect();
+            if parts.len() == 4 {
+                if let (Ok(timestamp), Ok(total_paid_ql), Ok(contributor_count), Ok(is_manual)) = (
+                    parts[0].parse::<i64>(),
+                    parts[1].parse::<f64>(),
+                    parts[2].parse::<usize>(),
+                    parts[3].parse::<bool>(),
+                ) {
+                    history.push(PayoutRecord { timestamp, total_paid_ql, contributor_count, is_manual });
+                }
+            }
+        }
+    }
+
+    if !history.is_empty() {
+        *state.payout_history.lock().unwrap() = history;
+    }
+    println!("[POOL] Restored saved all-time stats from pool_state.txt.");
+}
+
+/// Saves the pool's permanent stats to disk — called after every real
+/// distribution, so this data genuinely survives a restart rather than
+/// only existing in memory.
+fn save_persistent_state(state: &Arc<SharedState>) {
+    let blocks = *state.all_time_blocks_found.lock().unwrap();
+    let manual = *state.all_time_manual_rewards.lock().unwrap();
+    let distributed = *state.all_time_ql_distributed.lock().unwrap();
+    let history = state.payout_history.lock().unwrap().clone();
+
+    let mut content = format!(
+        "all_time_blocks_found={}\nall_time_manual_rewards={}\nall_time_ql_distributed={:.4}\n",
+        blocks, manual, distributed
+    );
+    for record in history.iter() {
+        content.push_str(&format!(
+            "payout|{}|{:.4}|{}|{}\n",
+            record.timestamp, record.total_paid_ql, record.contributor_count, record.is_manual
+        ));
+    }
+
+    if let Err(e) = std::fs::write("pool_state.txt", content) {
+        println!("[POOL] Warning: could not save persistent state to disk: {}", e);
+    }
 }
 
 fn main() {
@@ -820,6 +906,7 @@ fn main() {
         all_time_ql_distributed: Mutex::new(0.0),
         all_time_manual_rewards: Mutex::new(0),
     });
+    load_persistent_state(&state);
 
     // Background thread: keeps the shared template current by periodically
     // re-fetching from the real node. The pool itself never grinds nonces —
