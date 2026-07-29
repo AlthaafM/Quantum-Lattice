@@ -352,9 +352,9 @@
     <div class="pool-banner">
       <div class="left">
         <span class="badge">New</span>
-        <p>Desktop Wallet is here — a real, installable app, same post-quantum security as the browser wallet. Windows may show a SmartScreen warning since it's new, unsigned software — click either "Keep" or "Run anyway" when prompted.</p>
+        <p>Real, installable apps are here — desktop and mobile, same post-quantum security as the browser wallet.</p>
       </div>
-      <a href="/downloads/ql-wallet-windows-x64-setup.exe">⬇️ Download for Windows →</a>
+      <a href="#" data-tab-link="wallet">See wallet options →</a>
     </div>
 
     <div class="pq-section">
@@ -416,6 +416,11 @@
         <div class="eyebrow">Mining Pool Remaining</div>
         <div class="stat-value" id="stat-pool" style="color: var(--lattice-b);">—</div>
         <div class="stat-sub">Available for future block rewards</div>
+      </div>
+      <div class="panel">
+        <div class="eyebrow">Network Hashrate</div>
+        <div class="stat-value" id="stat-hashrate" style="color: var(--lattice-a);">—</div>
+        <div class="stat-sub">Estimated, all miners combined</div>
       </div>
     </div>
   </div>
@@ -484,9 +489,16 @@
       <div class="wallet-card">
         <div class="mark-big"></div>
         <h3>Desktop Wallet</h3>
-        <p>The same non-custodial, post-quantum wallet as a real, installable app. Mac and Android builds are on the way.</p>
+        <p>The same non-custodial, post-quantum wallet as a real, installable app. Mac build is on the way.</p>
         <a class="btn-wallet" href="/downloads/ql-wallet-windows-x64-setup.exe">⬇️ Download for Windows →</a>
         <p style="font-size:11.5px; color:var(--text-faint); margin-top:14px; margin-bottom:0;">Windows may show a SmartScreen warning since it's new, unsigned software — click either "Keep" or "Run anyway" when prompted.</p>
+      </div>
+      <div class="wallet-card">
+        <div class="mark-big"></div>
+        <h3>Mobile Wallet</h3>
+        <p>The same real, non-custodial wallet, native on Android — including fingerprint quick-unlock and QR-to-pay. iOS is on the roadmap.</p>
+        <a class="btn-wallet" href="/downloads/ql-wallet-android.apk">⬇️ Download for Android →</a>
+        <p style="font-size:11.5px; color:var(--text-faint); margin-top:14px; margin-bottom:0;">Android may warn about installing from an unknown source since it's new, unsigned software — allow it to continue.</p>
       </div>
     </div>
   </div>
@@ -638,6 +650,14 @@
   const GENESIS_SUPPLY = 5200000;
   const MINING_REWARD_POOL = 20300000;
 
+  function formatHashrate(hps) {
+    if (!hps || hps <= 0) return '—';
+    if (hps >= 1e9) return (hps / 1e9).toFixed(2) + ' GH/s';
+    if (hps >= 1e6) return (hps / 1e6).toFixed(2) + ' MH/s';
+    if (hps >= 1e3) return (hps / 1e3).toFixed(2) + ' KH/s';
+    return hps.toFixed(0) + ' H/s';
+  }
+
   async function refreshStats() {
     try {
       const res = await fetch('/api/json');
@@ -648,6 +668,7 @@
       const mined = data.total_supply_ql - GENESIS_SUPPLY;
       const poolLeft = Math.max(0, MINING_REWARD_POOL - mined);
       $('stat-pool').textContent = poolLeft.toLocaleString();
+      $('stat-hashrate').textContent = formatHashrate(data.estimated_network_hashrate);
     } catch (e) {
       $('stat-status').textContent = 'OFFLINE';
       $('stat-status').style.color = 'var(--danger)';
