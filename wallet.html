@@ -1251,6 +1251,7 @@ function enterDashboard() {
   }
 
   refreshChainData();
+  loadRealHistory();
   pollTimer = setInterval(refreshChainData, 6000);
 }
 
@@ -1375,6 +1376,46 @@ function addActivity(amount, to) {
   preview.prepend(row());
   while (preview.children.length > 2) {
     preview.removeChild(preview.lastChild);
+  }
+}
+
+// Real, complete transaction history — both sent AND received, straight
+// from the node itself, rather than only what this session personally
+// triggered. Fetched once on unlock (a full-chain scan on the node's
+// side, so not worth repeating on every 6-second poll).
+async function loadRealHistory() {
+  try {
+    const res = await fetch(apiBase() + '/api/transactions?address=' + currentAddress);
+    const data = await res.json();
+    const txs = (data.transactions || []).slice().sort((a, b) => b.block_height - a.block_height);
+
+    function row(tx) {
+      const el = document.createElement('div');
+      el.className = 'activity-item';
+      const sign = tx.direction === 'sent' ? '-' : '+';
+      const label = tx.direction === 'sent' ? 'Sent to ' : 'Received from ';
+      const color = tx.direction === 'sent' ? '' : 'color:var(--success);';
+      el.innerHTML = '<span class="label">' + label + tx.counterparty.slice(0, 14) + '…</span><span class="val" style="' + color + '">' + sign + tx.amount_ql + ' QL</span>';
+      return el;
+    }
+
+    const list = $('activity-list');
+    const preview = $('home-activity-preview');
+
+    if (txs.length === 0) {
+      list.innerHTML = '<div class="empty-note">No transactions yet.</div>';
+      preview.innerHTML = '<div class="empty-note">No transactions yet.</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    txs.forEach(tx => list.appendChild(row(tx)));
+
+    preview.innerHTML = '';
+    txs.slice(0, 2).forEach(tx => preview.appendChild(row(tx)));
+  } catch (e) {
+    // Leave whatever was already showing (e.g. session-only sends) if the
+    // real history genuinely can't be reached right now.
   }
 }
 
