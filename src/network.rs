@@ -428,11 +428,40 @@ impl P2PNode {
 
                         if first_line.starts_with("GET /api/json") {
                             let eng = engine_clone.lock().await;
+                            let current_height = eng.state.chain_height;
+                            let difficulty_bits = eng.state.difficulty_bits;
+
+                            // Real network hashrate, estimated the same way every
+                            // major explorer does it: hashrate = 2^difficulty /
+                            // average real seconds between blocks, over a recent,
+                            // rolling window (20 blocks) rather than any single
+                            // gap, which would be too noisy on its own.
+                            let window: u64 = 20;
+                            let mut estimated_hashrate: f64 = 0.0;
+                            if current_height > window {
+                                let newest = db_clone.get(format!("block_{}", current_height).as_bytes());
+                                let oldest = db_clone.get(format!("block_{}", current_height - window).as_bytes());
+                                if let (Ok(Some(newest_bytes)), Ok(Some(oldest_bytes))) = (newest, oldest) {
+                                    if let (Ok(newest_block), Ok(oldest_block)) = (
+                                        deserialize::<Block>(&newest_bytes),
+                                        deserialize::<Block>(&oldest_bytes),
+                                    ) {
+                                        let elapsed_secs = (newest_block.header.timestamp - oldest_block.header.timestamp) as f64;
+                                        if elapsed_secs > 0.0 {
+                                            let avg_secs_per_block = elapsed_secs / window as f64;
+                                            estimated_hashrate = 2f64.powi(difficulty_bits as i32) / avg_secs_per_block;
+                                        }
+                                    }
+                                }
+                            }
+
                             let json_response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"status\":\"OPERATIONAL\",\"network\":\"QUANTUM-LATTICE\",\"total_supply_ql\":{},\"chain_height\":{},\"active_database\":\"{}\"}}\r\n",
-                                eng.state.total_minted_supply / COIN,
-                                eng.state.chain_height,
-                                db_path_clone
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"status\":\"OPERATIONAL\",\"network\":\"QUANTUM-LATTICE\",\"total_supply_ql\":{:.8},\"chain_height\":{},\"active_database\":\"{}\",\"difficulty_bits\":{},\"estimated_network_hashrate\":{:.0}}}\r\n",
+                                eng.state.total_minted_supply as f64 / COIN as f64,
+                                current_height,
+                                db_path_clone,
+                                difficulty_bits,
+                                estimated_hashrate
                             );
                             let _ = socket.write_all(json_response.as_bytes()).await;
 
@@ -486,10 +515,10 @@ impl P2PNode {
                                                     let hash = block.calculate_hash();
                                                     let tx_items: Vec<String> = block.transactions.iter().map(|tx| {
                                                         format!(
-                                                            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount_ql\":{}}}",
+                                                            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount_ql\":{:.8}}}",
                                                             hex::encode(&tx.sender),
                                                             hex::encode(&tx.receiver),
-                                                            tx.amount / COIN
+                                                            tx.amount as f64 / COIN as f64
                                                         )
                                                     }).collect();
                                                     format!(
@@ -554,10 +583,68 @@ impl P2PNode {
                                 Ok(pk_bytes) => {
                                     let eng = engine_clone.lock().await;
                                     let balance = eng.balance_of(&pk_bytes);
+                                    // Genuine floating-point division here, not integer
+                                    // division — balance and COIN are both whole numbers,
+                                    // and dividing two whole numbers in Rust silently
+                                    // truncates any remainder. That previously discarded
+                                    // any fractional QL entirely (e.g. a real balance of
+                                    // 1.4328 QL was being reported back as a flat 1),
+                                    // rather than actually rounding or being imprecise —
+                                    // the fractional amount was being lost outright.
                                     format!(
                                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"address\":\"{}\",\"balance_ql\":{:.8}}}\r\n",
                                         address_hex,
                                         balance as f64 / COIN as f64
+                                    )
+                                }
+                                Err(_) => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nInvalid hex address\r\n".to_string(),
+                            };
+                            let _ = socket.write_all(response.as_bytes()).await;
+
+                        } else if first_line.starts_with("GET /api/transactions") {
+                            // Real, complete transaction history for an address —
+                            // both sent AND received, unlike the wallets' own
+                            // local, session-only tracking, which only ever
+                            // knows about sends it personally triggered. This
+                            // scans every real block on the chain, since there's
+                            // no separate address-to-transaction index (yet) —
+                            // genuinely fine at the chain's current size, worth
+                            // revisiting with a proper index if it ever grows
+                            // large enough to make this noticeably slow.
+                            let address_hex = extract_query_param(first_line, "address").unwrap_or_default();
+                            let response = match hex::decode(&address_hex) {
+                                Ok(address_bytes) => {
+                                    let current_height = engine_clone.lock().await.state.chain_height;
+                                    let mut items: Vec<String> = Vec::new();
+
+                                    let mut h = current_height;
+                                    loop {
+                                        if let Ok(Some(bytes)) = db_clone.get(format!("block_{}", h).as_bytes()) {
+                                            if let Ok(block) = deserialize::<Block>(&bytes) {
+                                                for tx in block.transactions.iter() {
+                                                    let is_sender = tx.sender == address_bytes;
+                                                    let is_receiver = tx.receiver == address_bytes;
+                                                    if is_sender || is_receiver {
+                                                        items.push(format!(
+                                                            "{{\"direction\":\"{}\",\"counterparty\":\"{}\",\"amount_ql\":{:.8},\"block_height\":{},\"timestamp\":{}}}",
+                                                            if is_sender { "sent" } else { "received" },
+                                                            if is_sender { hex::encode(&tx.receiver) } else { hex::encode(&tx.sender) },
+                                                            tx.amount as f64 / COIN as f64,
+                                                            block.header.block_height,
+                                                            block.header.timestamp
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if h == 0 { break; }
+                                        h -= 1;
+                                    }
+
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"address\":\"{}\",\"transactions\":[{}]}}\r\n",
+                                        address_hex,
+                                        items.join(",")
                                     )
                                 }
                                 Err(_) => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nInvalid hex address\r\n".to_string(),
@@ -886,6 +973,22 @@ impl P2PNode {
                                 }
                             }
 
+                        } else if first_line.starts_with("GET /downloads/ql-wallet-android.apk") {
+                            match fs::read("app-release.apk") {
+                                Ok(bytes) => {
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.android.package-archive\r\nContent-Disposition: attachment; filename=\"ql-wallet-android.apk\"\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                                        bytes.len()
+                                    );
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    let _ = socket.write_all(&bytes).await;
+                                }
+                                Err(_) => {
+                                    let resp = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nDownload file not found on this node.\r\n";
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                }
+                            }
+
                         } else {
                             let html_content = fs::read_to_string("public_explorer.html")
                                 .unwrap_or_else(|_| "<h1>public_explorer.html missing</h1>".to_string());
@@ -955,18 +1058,18 @@ impl P2PNode {
                         if first_line.starts_with("GET /api/admin/json") {
                             let eng = engine_clone.lock().await;
                             let json_response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"chain_height\":{},\"total_minted_supply\":{},\"vault_a_balance\":{},\"vault_b_balance\":{},\"vault_a_address\":\"{}\",\"vault_b_address\":\"{}\",\"mining_pool_remaining\":{}}}\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"chain_height\":{},\"total_minted_supply\":{:.8},\"vault_a_balance\":{:.8},\"vault_b_balance\":{:.8},\"vault_a_address\":\"{}\",\"vault_b_address\":\"{}\",\"mining_pool_remaining\":{:.8}}}\r\n",
                                 eng.state.chain_height,
-                                eng.state.total_minted_supply / COIN,
-                                eng.balance_of(&va) / COIN,
-                                eng.balance_of(&vb) / COIN,
+                                eng.state.total_minted_supply as f64 / COIN as f64,
+                                eng.balance_of(&va) as f64 / COIN as f64,
+                                eng.balance_of(&vb) as f64 / COIN as f64,
                                 hex::encode(&va),
                                 hex::encode(&vb),
                                 (crate::consensus::MINING_REWARD_POOL.saturating_sub(
                                     eng.state.total_minted_supply.saturating_sub(
                                         crate::consensus::VAULT_A_ALLOCATION + crate::consensus::VAULT_B_ALLOCATION
                                     )
-                                )) / COIN
+                                )) as f64 / COIN as f64
                             );
                             let _ = socket.write_all(json_response.as_bytes()).await;
 
