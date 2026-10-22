@@ -19,12 +19,30 @@ Built by [Futuristic AI](https://futuristicai.co.za), Durban, South Africa.
 - *Post-quantum from genesis* — every signature, including mining rewards and vault transfers, uses ML-DSA-65. No legacy ECDSA anywhere in the signing path.
 - *Non-custodial wallet* — keys are generated and signed entirely client-side (WASM in the browser); the node never sees a private key. Recovery via an encrypted keystore file or a 24-word BIP39 seed phrase.
 - *Encrypted vaults at rest* — treasury keys are password-protected (AES-256-GCM + PBKDF2), unlocked once into memory at node startup, never re-read from disk in plaintext.
-- *Real difficulty retargeting* — a 5-minute block time target, adjusted every 10 blocks based on actual observed timing.
+- *Real difficulty retargeting* — per-block adjustment toward a 5-minute target using fixed-point difficulty (Fork 2, active from block 35,600). Before that block, the original 10-block retarget applies.
 - *Miners are paid directly to any wallet address you already control* — no separate mining account to manage or migrate funds out of later.
 - *Continuous peer sync* — nodes automatically re-check their peers for missed blocks on an ongoing basis, not just once at startup, so a node stays current on its own even after a brief network interruption.
 - *Live peer visibility* — the admin dashboard shows real, direct evidence of which peers have actually contacted a node, independent of its own configured peer list.
 - *Optional email verification* (OTP) for the wallet directory layer, with rate limiting on every endpoint that sends email or accepts public input.
 - *A public "Security & Transparency" page*, with real, independently reproducible cryptographic test vectors — see the live explorer.
+
+## Consensus upgrade: Fork 2 (activates at block 35,600)
+
+Fork 2 replaces the old difficulty rule, which only retargeted every 10 blocks
+and rounded to a whole bit, with a fine-grained per-block rule.
+
+- Difficulty is a fixed-point number (1 bit = 65,536) checked as hash < target.
+- It adjusts after every block: next = previous + (300s - block gap) / 3600s.
+  There is no boundary block and no dead zone.
+- Block timestamps must be above the median of the previous 11 blocks and no
+  more than 15 minutes ahead of a node's clock.
+- Emergency easing after a stalled chain still applies for the one block it eases.
+- Integer math only, so every platform agrees.
+
+Upgrading: every node must run this build before block 35,600, or it will split
+from the chain at that block. Miners need no update: the mining template still
+sends difficulty_bits (rounded up). Updated miners and the pool also read
+difficulty_fp for exact mining.
 
 ## Building
 
