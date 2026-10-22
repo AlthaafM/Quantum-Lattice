@@ -89,23 +89,40 @@ fn is_local_address(host: &str) -> bool {
 /// exact host string to use in the HTTP request's Host header.
 fn connect(node_address: &str) -> Option<(Conn, String)> {
     let host = node_address.split(':').next().unwrap_or(node_address).to_string();
+    let port: u16 = node_address.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(443);
 
     // Without this, a connection that stalls mid-request (a dropped packet
     // on a flaky WiFi connection, for instance) hangs the whole program
-    // indefinitely — no crash, no error, just silence — since std's
+    // indefinitely - no crash, no error, just silence - since std's
     // TcpStream has no timeout at all by default.
     const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
 
+    // The main node (port 8034) sits behind Cloudflare's standard HTTPS
+    // proxy, which only accepts real connections on 443, so for that
+    // specific, known port, we deliberately connect on 443 regardless of
+    // what was typed. Any OTHER explicit port (like a mining pool on a
+    // non-standard port, reachable directly without a proxy in front of
+    // it) uses plain TCP on the literal port given instead.
+    let use_tls_on_443 = !is_local_address(&host) && port == 8034;
+
     if is_local_address(&host) {
-        // Local/dev testing — unchanged from how this always worked.
+        // Local/dev testing - unchanged from how this always worked.
         let stream = TcpStream::connect(node_address).ok()?;
         stream.set_read_timeout(Some(NETWORK_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(NETWORK_TIMEOUT)).ok()?;
         Some((Conn::Plain(stream), node_address.to_string()))
+    } else if !use_tls_on_443 {
+        // A real domain name, but on a non-standard port not fronted by a
+        // proxy - connect directly, plainly, on the literal port given.
+        let stream = TcpStream::connect((host.as_str(), port)).ok()?;
+        stream.set_read_timeout(Some(NETWORK_TIMEOUT)).ok()?;
+        stream.set_write_timeout(Some(NETWORK_TIMEOUT)).ok()?;
+        Some((Conn::Plain(stream), node_address.to_string()))
     } else {
-        // A real domain name — connect on 443 regardless of whatever port
-        // was typed alongside it, since that's the only port a public
-        // HTTPS-fronted domain actually accepts connections on.
+        // The main node's real domain - connect on 443 regardless of
+        // whatever port was typed alongside it, since that's the only
+        // port a public HTTPS-fronted domain actually accepts connections
+        // on.
         let mut root_store = RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let config = ClientConfig::builder()
@@ -207,6 +224,72 @@ fn meets_difficulty(hash: &[u8], required_bits: u32) -> bool {
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------
+// Fine-grained difficulty (fork 2). Copied from consensus.rs in the node:
+// target_from_fine / hash_below_target MUST stay identical to the node's.
+// A fixed-point difficulty of 65536 = 1.0 bit; whole-bit values give exactly
+// the same result as the old "leading zero bits" test.
+// ---------------------------------------------------------------------
+fn exp2_factor(frac: u32) -> u64 {
+    let f = frac as u128;
+    ((195766423245049u128 * f + 971821376u128 * f * f + 5127u128 * f * f * f + (1u128 << 47)) >> 48) as u64
+}
+
+fn target_from_fine(fine: u32) -> [u8; 32] {
+    let fine = fine.clamp(1 << 16, 255 << 16);
+    let e = (256u64 << 16) - fine as u64;
+    let int_part = (e >> 16) as u32;
+    let frac = (e & 0xFFFF) as u32;
+    let mant = 65536u64 + exp2_factor(frac);
+    let shift = int_part - 16;
+    let mut t = [0u8; 32];
+    for k in 0..17u32 {
+        if (mant >> k) & 1 == 1 {
+            let pos = shift + k;
+            if pos >= 256 {
+                return [0xFFu8; 32];
+            }
+            t[31 - (pos / 8) as usize] |= 1u8 << (pos % 8);
+        }
+    }
+    t
+}
+
+fn hash_below_target(hash: &[u8], target: &[u8; 32]) -> bool {
+    if hash.len() != 32 {
+        return false;
+    }
+    for i in 0..32 {
+        if hash[i] < target[i] {
+            return true;
+        }
+        if hash[i] > target[i] {
+            return false;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod fine_difficulty_tests {
+    use super::*;
+    #[test]
+    fn matches_node_vectors() {
+        let mut expect = [0u8; 32];
+        expect[31 - 221 / 8] = 1 << (221 % 8);
+        assert_eq!(target_from_fine(35 << 16), expect);
+        let t = target_from_fine((35 << 16) + 32768);
+        let mut m: u64 = 0;
+        for k in 0..17u32 {
+            let pos = 204 + k;
+            if t[31 - (pos / 8) as usize] & (1u8 << (pos % 8)) != 0 {
+                m |= 1 << k;
+            }
+        }
+        assert_eq!(m, 92674);
+    }
 }
 
 fn print_usage_and_exit() -> ! {
@@ -329,12 +412,17 @@ fn main() {
             (miner_pk.clone(), real_difficulty)
         };
 
+        // Fine-grained difficulty (solo mining only; pool shares stay whole-bit).
+        // Older nodes don't send it, in which case the whole-bit check is used.
+        let fine_fp: Option<u32> = if pool_mode { None } else { extract_json_number(body, "difficulty_fp").map(|v| v as u32) };
+        let target: Option<Arc<[u8; 32]>> = fine_fp.map(|fp| Arc::new(target_from_fine(fp)));
+
         let prev_hash = Arc::new(hex::decode(&prev_hash_hex).unwrap_or_default());
         let merkle_root = Arc::new(hex::decode(&merkle_root_hex).unwrap_or_default());
 
         println!(
-            "[{}] [MINER] Got template for block {} (fetch started {}) — mining at {} leading zero bit(s)...",
-            now(), block_height, fetch_start, difficulty
+            "[{}] [MINER] Got template for block {} (fetch started {}) — mining at difficulty {:.2} bits...",
+            now(), block_height, fetch_start, fine_fp.map(|f| f as f64 / 65536.0).unwrap_or(difficulty as f64)
         );
 
         let hash_start = now();
@@ -355,6 +443,7 @@ fn main() {
             let prev_hash = prev_hash.clone();
             let merkle_root = merkle_root.clone();
             let hash_address = hash_address.clone();
+            let target = target.clone();
 
             let handle = thread::spawn(move || {
                 let mut start_nonce_bytes = [0u8; 8];
@@ -373,7 +462,7 @@ fn main() {
                         break;
                     }
                     let hash = calculate_pow_hash(1, &prev_hash, &merkle_root, block_height, &hash_address, nonce);
-                    if meets_difficulty(&hash, difficulty) {
+                    if match target.as_ref() { Some(t) => hash_below_target(&hash, t), None => meets_difficulty(&hash, difficulty) } {
                         winning_nonce.store(nonce, Ordering::SeqCst);
                         found_flag.store(true, Ordering::SeqCst);
                         break;
