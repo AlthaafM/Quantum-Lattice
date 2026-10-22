@@ -252,6 +252,72 @@ fn meets_difficulty(hash: &[u8], required_bits: u32) -> bool {
 }
 
 // ---------------------------------------------------------------------
+// Fine-grained difficulty (fork 2). Copied from consensus.rs in the node:
+// target_from_fine / hash_below_target MUST stay identical to the node's.
+// A fixed-point difficulty of 65536 = 1.0 bit; whole-bit values give exactly
+// the same result as the old "leading zero bits" test.
+// ---------------------------------------------------------------------
+fn exp2_factor(frac: u32) -> u64 {
+    let f = frac as u128;
+    ((195766423245049u128 * f + 971821376u128 * f * f + 5127u128 * f * f * f + (1u128 << 47)) >> 48) as u64
+}
+
+fn target_from_fine(fine: u32) -> [u8; 32] {
+    let fine = fine.clamp(1 << 16, 255 << 16);
+    let e = (256u64 << 16) - fine as u64;
+    let int_part = (e >> 16) as u32;
+    let frac = (e & 0xFFFF) as u32;
+    let mant = 65536u64 + exp2_factor(frac);
+    let shift = int_part - 16;
+    let mut t = [0u8; 32];
+    for k in 0..17u32 {
+        if (mant >> k) & 1 == 1 {
+            let pos = shift + k;
+            if pos >= 256 {
+                return [0xFFu8; 32];
+            }
+            t[31 - (pos / 8) as usize] |= 1u8 << (pos % 8);
+        }
+    }
+    t
+}
+
+fn hash_below_target(hash: &[u8], target: &[u8; 32]) -> bool {
+    if hash.len() != 32 {
+        return false;
+    }
+    for i in 0..32 {
+        if hash[i] < target[i] {
+            return true;
+        }
+        if hash[i] > target[i] {
+            return false;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod fine_difficulty_tests {
+    use super::*;
+    #[test]
+    fn matches_node_vectors() {
+        let mut expect = [0u8; 32];
+        expect[31 - 221 / 8] = 1 << (221 % 8);
+        assert_eq!(target_from_fine(35 << 16), expect);
+        let t = target_from_fine((35 << 16) + 32768);
+        let mut m: u64 = 0;
+        for k in 0..17u32 {
+            let pos = 204 + k;
+            if t[31 - (pos / 8) as usize] & (1u8 << (pos % 8)) != 0 {
+                m |= 1 << k;
+            }
+        }
+        assert_eq!(m, 92674);
+    }
+}
+
+// ---------------------------------------------------------------------
 // The pool's own encrypted identity — same AES-256-GCM + PBKDF2 scheme
 // already used for the node's treasury vaults, duplicated here since this
 // is a standalone project with no access to the main crate's wallet.rs.
@@ -362,6 +428,7 @@ struct RoundTemplate {
     previous_block_hash: Vec<u8>,
     merkle_root: Vec<u8>,
     real_difficulty_bits: u32,
+    real_difficulty_fp: u32,
     pool_difficulty_bits: u32,
 }
 
@@ -475,7 +542,7 @@ fn handle_miner_connection(
                                 *shares.entry(contributor_hex.clone()).or_insert(0) += 1;
                             }
 
-                            let is_real_win = meets_difficulty(&hash, t.real_difficulty_bits);
+                            let is_real_win = hash_below_target(&hash, &target_from_fine(t.real_difficulty_fp));
                             if is_real_win {
                                 println!("[POOL] Real block found via a share from {}! Submitting...", contributor_hex);
                             }
@@ -518,7 +585,7 @@ fn handle_miner_connection(
         // real balance changes work correctly without waiting on genuine
         // 38-bit network odds. Restricted to loopback only — never meant
         // to be reachable by anyone actually connecting as a miner.
-        let is_loopback = stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+        let is_loopback = stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false) && !request.to_lowercase().contains("cf-connecting-ip") && !request.to_lowercase().contains("x-forwarded-for");
         if !is_loopback {
             let resp = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\nThis endpoint is only reachable from the pool's own machine.\r\n";
             let _ = stream.write_all(resp.as_bytes());
@@ -528,6 +595,21 @@ fn handle_miner_connection(
             let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"status\":\"triggered\"}\r\n";
             let _ = stream.write_all(resp.as_bytes());
         }
+
+    } else if first_line.starts_with("POST /pool/repay") {
+        // ONE-SHOT, local only: replays a lost payout from repay.txt (lines of
+        // "address,shares"), using the pool's real current balance and the same
+        // proportional formula as process_payouts. repay.txt is renamed to
+        // repay_done.txt before anything is sent, so it cannot run twice.
+        let req_lower = request.to_lowercase();
+        let local_only = stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false)
+            && !req_lower.contains("cf-connecting-ip") && !req_lower.contains("x-forwarded-for");
+        let resp = if !local_only {
+            "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\nLocal machine only.\r\n".to_string()
+        } else {
+            repay_from_file(&node_address, pool_seed, &pool_pk, &pool_pk_hex)
+        };
+        let _ = stream.write_all(resp.as_bytes());
 
     } else if first_line.starts_with("GET /pool/stats") {
         // Real, live data for a dashboard — current round info, a live
@@ -643,7 +725,12 @@ fn refresh_template(node_address: &str, state: &Arc<SharedState>) {
     let block_height = match extract_json_number(body, "block_height") { Some(v) => v, None => return };
     let prev_hash_hex = match extract_json_string(body, "previous_block_hash") { Some(v) => v, None => return };
     let merkle_root_hex = match extract_json_string(body, "merkle_root") { Some(v) => v, None => return };
-    let real_difficulty = extract_json_number(body, "difficulty_bits").unwrap_or(20) as u32;
+    let real_difficulty_bits_ceil = extract_json_number(body, "difficulty_bits").unwrap_or(20) as u32;
+    // Fine-grained difficulty (65536 = 1 bit). Nodes from before fork 2 don't send it.
+    let real_difficulty_fp = extract_json_number(body, "difficulty_fp")
+        .map(|v| v as u32)
+        .unwrap_or(real_difficulty_bits_ceil << 16);
+    let real_difficulty = real_difficulty_fp >> 16;
     let pool_difficulty = real_difficulty.saturating_sub(POOL_DIFFICULTY_REDUCTION_BITS).max(8);
 
     let previous_block_hash = hex::decode(&prev_hash_hex).unwrap_or_default();
@@ -658,14 +745,15 @@ fn refresh_template(node_address: &str, state: &Arc<SharedState>) {
         block_height,
         previous_block_hash,
         merkle_root,
-        real_difficulty_bits: real_difficulty,
+        real_difficulty_bits: real_difficulty_bits_ceil,
+        real_difficulty_fp,
         pool_difficulty_bits: pool_difficulty,
     });
 
     if is_new_round {
         println!(
-            "[{}] [POOL] New round — block {} at real difficulty {} bits (pool difficulty {} bits).",
-            now(), block_height, real_difficulty, pool_difficulty
+            "[{}] [POOL] New round — block {} at real difficulty {:.3} bits (pool difficulty {} bits).",
+            now(), block_height, real_difficulty_fp as f64 / 65536.0, pool_difficulty
         );
     }
 }
@@ -798,6 +886,71 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
     *state.all_time_ql_distributed.lock().unwrap() += available_ql;
 
     save_persistent_state(state);
+}
+
+fn repay_from_file(node_address: &str, pool_seed: [u8; 32], pool_pk: &[u8], pool_pk_hex: &str) -> String {
+    fn http(status: &str, body: &str) -> String {
+        format!("HTTP/1.1 {}\r\nConnection: close\r\n\r\n{}\r\n", status, body)
+    }
+    let content = match fs::read_to_string("repay.txt") {
+        Ok(c) => c,
+        Err(_) => return http("404 Not Found", "{\"error\":\"no repay.txt\"}"),
+    };
+    let mut rows: Vec<(String, u64)> = Vec::new();
+    for line in content.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') { continue; }
+        let mut parts = l.split(',');
+        let addr = parts.next().unwrap_or("").trim().to_string();
+        let shares = parts.next().unwrap_or("").trim().parse::<u64>();
+        if addr.len() != 3904 || hex::decode(&addr).is_err() || shares.is_err() {
+            return http("400 Bad Request", "{\"error\":\"bad line in repay.txt\"}");
+        }
+        rows.push((addr, shares.unwrap()));
+    }
+    let total: u64 = rows.iter().map(|(_, s)| *s).sum();
+    if rows.is_empty() || total == 0 {
+        return http("400 Bad Request", "{\"error\":\"repay.txt is empty\"}");
+    }
+    let balance_response = match http_get(node_address, &format!("/api/balance?address={}", pool_pk_hex)) {
+        Some(r) => r,
+        None => return http("502 Bad Gateway", "{\"error\":\"node unreachable\"}"),
+    };
+    let balance_body = balance_response.split("\r\n\r\n").nth(1).unwrap_or("");
+    let available_ql = match extract_json_float(balance_body, "balance_ql") {
+        Some(b) if b > 0.0 => b,
+        _ => return http("400 Bad Request", "{\"error\":\"pool balance is zero or unreadable\"}"),
+    };
+    // Rename FIRST so a second call can never repeat the payout.
+    if fs::rename("repay.txt", "repay_done.txt").is_err() {
+        return http("500 Internal Server Error", "{\"error\":\"could not rename repay.txt\"}");
+    }
+    println!("[POOL] REPAY — distributing {:.4} QL across {} address(es).", available_ql, rows.len());
+    const COIN: f64 = 100_000_000.0;
+    let mut sent = 0;
+    for (addr, shares) in rows.iter() {
+        let payout_ql = available_ql * (*shares as f64 / total as f64);
+        let payout_smallest = (payout_ql * COIN).round() as u64;
+        if payout_smallest == 0 { continue; }
+        let receiver = hex::decode(addr).unwrap();
+        let mut message = Vec::with_capacity(pool_pk.len() + receiver.len() + 8);
+        message.extend_from_slice(pool_pk);
+        message.extend_from_slice(&receiver);
+        message.extend_from_slice(&payout_smallest.to_le_bytes());
+        let signature = sign_with_seed(&pool_seed, &message);
+        let tx_body = format!(
+            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{},\"signature\":\"{}\"}}",
+            pool_pk_hex, addr, payout_smallest, hex::encode(&signature)
+        );
+        match http_post(node_address, "/api/submit_tx", &tx_body) {
+            Some(r) if r.starts_with("HTTP/1.1 200") => {
+                sent += 1;
+                println!("[POOL] REPAY — queued {:.4} QL to {}", payout_ql, addr);
+            }
+            _ => println!("[POOL] REPAY — FAILED to queue {:.4} QL to {}", payout_ql, addr),
+        }
+    }
+    http("200 OK", &format!("{{\"status\":\"done\",\"queued\":{}}}", sent))
 }
 
 fn print_usage_and_exit() -> ! {
