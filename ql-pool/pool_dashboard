@@ -88,6 +88,20 @@
   }
   .cmd-block .lbl { color: var(--text-faint); display: block; margin-bottom: 4px; font-family: var(--display); font-size: 10.5px; text-transform: uppercase; }
 
+  details.round { border-bottom: 1px solid var(--edge); }
+  details.round:last-child { border-bottom: none; }
+  details.round summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 10px; font-family: var(--mono); font-size: 13px; }
+  details.round summary::-webkit-details-marker { display: none; }
+  details.round summary span:first-of-type { flex: 1; }
+  details.round summary::before { content: '\25B8'; color: var(--lattice-b); margin-right: 2px; }
+  details.round[open] summary::before { content: '\25BE'; }
+  details.round table { margin: 0 0 10px; }
+  .pct { color: var(--text-faint); }
+  .note { color: var(--text-faint); font-size: 12px; margin-top: 12px; }
+  .search-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .search-row input { flex: 1; min-width: 220px; background: #0a0b16; border: 1px solid var(--edge); border-radius: 10px; padding: 11px 14px; color: var(--text); font-family: var(--mono); font-size: 12px; }
+  .search-row button { background: linear-gradient(135deg, var(--lattice-a), var(--lattice-b)); border: 0; border-radius: 10px; padding: 11px 22px; color: #07070d; font-weight: 700; cursor: pointer; font-family: var(--display); }
+
   footer { text-align: center; margin-top: 40px; }
   footer a { color: var(--lattice-b); text-decoration: none; font-size: 12px; }
   footer a:hover { text-decoration: underline; }
@@ -188,6 +202,39 @@
     </table>
   </div>
 
+  <div class="section-title">Who got paid &mdash; latest payout rounds</div>
+  <div class="card">
+    <div id="rounds-box"><div class="empty-row">Loading</div></div>
+    <div id="older-box"></div>
+    <div class="search-row" style="margin-top:12px">
+      <button id="older-btn" type="button">Show 10 older rounds</button>
+    </div>
+    <div class="note" id="payments-note"></div>
+    <div class="search-row" style="margin-top:16px">
+      <input id="block-input" placeholder="Find a payout round by block number" inputmode="numeric" spellcheck="false" autocomplete="off">
+      <button id="block-btn" type="button">Search</button>
+    </div>
+    <div id="block-result"></div>
+  </div>
+
+  <div class="section-title">Top earners, all-time</div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Rank</th><th>Address</th><th>Total received</th><th>Payouts</th></tr></thead>
+      <tbody id="top-tbody"><tr><td colspan="4" class="empty-row">Loading</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title">Find your payments</div>
+  <div class="card">
+    <div class="search-row">
+      <input id="addr-input" placeholder="Paste your full wallet address" spellcheck="false" autocomplete="off">
+      <button id="addr-btn" type="button">Search</button>
+    </div>
+    <div id="addr-result"></div>
+    <div class="note">Read straight from the blockchain &mdash; every payout the pool has ever sent, not a separate record.</div>
+  </div>
+
   <footer><a href="https://futuristicai.co.za" target="_blank" rel="noopener">FuturisticAI</a></footer>
 </div>
 
@@ -249,6 +296,95 @@
 
   refresh();
   setInterval(refresh, 5000);
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function fmtQL(n) { return Number(n).toLocaleString(undefined, {maximumFractionDigits: 4}); }
+  function fmtDate(ts) { return new Date(ts * 1000).toLocaleString(); }
+
+  let oldestShown = 0;
+  function roundHtml(r) {
+    const rows = r.payments.slice().sort((a, b) => b.amount_ql - a.amount_ql).map(p =>
+      '<tr><td>' + esc(p.address) + '</td><td>' + fmtQL(p.amount_ql) + ' QL</td><td class="pct">' +
+      (r.total_ql > 0 ? (p.amount_ql / r.total_ql * 100).toFixed(1) : '0.0') + '%</td></tr>'
+    ).join('');
+    return '<details class="round"><summary><span>' + esc(fmtDate(r.timestamp)) + ' &middot; block ' +
+      r.block_height.toLocaleString() + '</span><span>' + fmtQL(r.total_ql) + ' QL to ' + r.payments.length +
+      ' miner' + (r.payments.length === 1 ? '' : 's') + '</span></summary><table><tbody>' + rows + '</tbody></table></details>';
+  }
+  async function showOlder() {
+    if (!oldestShown) return;
+    try {
+      const d = await (await fetch('/pool/payments/older?before=' + oldestShown)).json();
+      if (!d.rounds.length) { $('older-btn').style.display = 'none'; return; }
+      $('older-box').insertAdjacentHTML('beforeend', d.rounds.map(roundHtml).join(''));
+      oldestShown = d.rounds[d.rounds.length - 1].block_height;
+      if (!d.more) $('older-btn').style.display = 'none';
+    } catch (e) {}
+  }
+  async function findRound() {
+    const out = $('block-result');
+    const n = $('block-input').value.replace(/[,\s]/g, '');
+    if (!/^[0-9]{1,12}$/.test(n)) { out.innerHTML = '<div class="empty-row">Enter a block number, digits only.</div>'; return; }
+    out.innerHTML = '<div class="empty-row">Searching</div>';
+    try {
+      const d = await (await fetch('/pool/payments/round?block=' + n)).json();
+      out.innerHTML = d.rounds.length ? d.rounds.map(roundHtml).join('').replace('<details class="round">', '<details class="round" open>')
+        : '<div class="empty-row">No pool payout was recorded in block ' + esc(Number(n).toLocaleString()) +
+          '. A round is listed under the block that carried its payout transactions.</div>';
+    } catch (e) { out.innerHTML = '<div class="empty-row">Could not reach the pool. Try again in a moment.</div>'; }
+  }
+  async function loadPayments() {
+    try {
+      const d = await (await fetch('/pool/payments/recent')).json();
+      const box = $('rounds-box');
+      if (!d.rounds.length) {
+        box.innerHTML = '<div class="empty-row">No payouts found on the chain yet.</div>';
+      } else {
+        box.innerHTML = d.rounds.map(roundHtml).join('');
+        if (!oldestShown && d.rounds.length) oldestShown = d.rounds[d.rounds.length - 1].block_height;
+      }
+      $('payments-note').textContent = d.total_payments.toLocaleString() + ' payments totalling ' + fmtQL(d.total_paid_ql) +
+        ' QL across ' + d.total_rounds.toLocaleString() + ' payout rounds, read from the chain.';
+      $('top-tbody').innerHTML = d.top.length
+        ? d.top.map((t, i) => '<tr><td class="rank">#' + (i + 1) + '</td><td>' + esc(t.address) + '</td><td>' +
+            fmtQL(t.total_ql) + ' QL</td><td>' + t.payments + '</td></tr>').join('')
+        : '<tr><td colspan="4" class="empty-row">No payments yet.</td></tr>';
+    } catch (e) {
+      // leave whatever was last shown
+    }
+  }
+
+  async function findPayments() {
+    const out = $('addr-result');
+    const a = $('addr-input').value.trim().toLowerCase();
+    if (!/^[0-9a-f]{3904}$/.test(a)) {
+      out.innerHTML = '<div class="empty-row">That does not look like a full QL address (3,904 hex characters). Copy it again from your wallet.</div>';
+      return;
+    }
+    out.innerHTML = '<div class="empty-row">Searching</div>';
+    try {
+      const d = await (await fetch('/pool/payments?address=' + a)).json();
+      if (!d.count) {
+        out.innerHTML = '<div class="empty-row">No payments found for that address yet.</div>';
+        return;
+      }
+      out.innerHTML = '<div style="margin-bottom:12px;font-family:var(--mono);font-size:13px">Received <b style="color:var(--success)">' +
+        fmtQL(d.total_ql) + ' QL</b> in ' + d.count + ' payment' + (d.count === 1 ? '' : 's') + '</div>' +
+        '<table><thead><tr><th>When</th><th>Block</th><th>Amount</th></tr></thead><tbody>' +
+        d.payments.map(p => '<tr><td>' + esc(fmtDate(p.timestamp)) + '</td><td>' + p.block_height.toLocaleString() +
+          '</td><td>' + fmtQL(p.amount_ql) + ' QL</td></tr>').join('') + '</tbody></table>' +
+        (d.count > d.payments.length ? '<div class="note">Showing the newest ' + d.payments.length + '.</div>' : '');
+    } catch (e) {
+      out.innerHTML = '<div class="empty-row">Could not reach the pool. Try again in a moment.</div>';
+    }
+  }
+  $('older-btn').addEventListener('click', showOlder);
+  $('block-btn').addEventListener('click', findRound);
+  $('block-input').addEventListener('keydown', e => { if (e.key === 'Enter') findRound(); });
+  $('addr-btn').addEventListener('click', findPayments);
+  $('addr-input').addEventListener('keydown', e => { if (e.key === 'Enter') findPayments(); });
+  loadPayments();
+  setInterval(loadPayments, 60000);
 </script>
 </body>
 </html>
