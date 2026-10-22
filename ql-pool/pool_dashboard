@@ -166,7 +166,7 @@
     <div class="panel">
       <div class="eyebrow">Total Distributed</div>
       <div class="stat-value" id="stat-total-distributed" style="color: var(--success);">-</div>
-      <div class="stat-sub">QL, all-time</div>
+      <div class="stat-sub">QL paid to miners, read from the chain</div>
     </div>
     <div class="panel">
       <div class="eyebrow"><span class="pulse-dot"></span>Pending Rewards</div>
@@ -240,6 +240,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
+  let chainTotal = null;
 
   function truncateHex(h) {
     if (!h || h.length <= 28) return h;
@@ -271,7 +272,8 @@
       $('stat-hashrate').textContent = formatHashrate(data.pool_hashrate);
       $('stat-blocks-found').textContent = data.all_time_blocks_found.toLocaleString();
       $('stat-manual-rewards').textContent = data.all_time_manual_rewards.toLocaleString();
-      $('stat-total-distributed').textContent = Number(data.all_time_ql_distributed).toLocaleString(undefined, {maximumFractionDigits: 2});
+      // Until the chain-read total arrives, show the pool's own counter; after that the chain figure wins.
+      if (chainTotal === null) $('stat-total-distributed').textContent = Number(data.all_time_ql_distributed).toLocaleString(undefined, {maximumFractionDigits: 2});
       $('stat-pending-balance').textContent = Number(data.pending_balance_ql).toLocaleString(undefined, {maximumFractionDigits: 2});
 
       if (data.standings.length === 0) {
@@ -343,6 +345,8 @@
         box.innerHTML = d.rounds.map(roundHtml).join('');
         if (!oldestShown && d.rounds.length) oldestShown = d.rounds[d.rounds.length - 1].block_height;
       }
+      chainTotal = d.total_paid_ql;
+      $('stat-total-distributed').textContent = Number(d.total_paid_ql).toLocaleString(undefined, {maximumFractionDigits: 2});
       $('payments-note').textContent = d.total_payments.toLocaleString() + ' payments totalling ' + fmtQL(d.total_paid_ql) +
         ' QL across ' + d.total_rounds.toLocaleString() + ' payout rounds, read from the chain.';
       $('top-tbody').innerHTML = d.top.length
