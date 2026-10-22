@@ -94,6 +94,21 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
+/// Median timestamp of the last MTP_WINDOW blocks up to and including tip_height
+/// (fork 2 timestamp rule).
+fn median_time_past(db: &DB, tip_height: u64) -> i64 {
+    let lo = tip_height.saturating_sub(crate::consensus::MTP_WINDOW - 1);
+    let mut ts: Vec<i64> = Vec::new();
+    for h in lo..=tip_height {
+        if let Ok(Some(bytes)) = db.get(format!("block_{}", h).as_bytes()) {
+            if let Ok(b) = deserialize::<Block>(&bytes) {
+                ts.push(b.header.timestamp);
+            }
+        }
+    }
+    crate::consensus::median_of(ts)
+}
+
 async fn read_http_request(socket: &mut TcpStream) -> String {
     let read_future = async {
         let mut data: Vec<u8> = Vec::new();
@@ -266,9 +281,31 @@ impl P2PNode {
             return false;
         }
 
-        if !meets_difficulty(&block.header.calculate_pow_hash(), eng.state.difficulty_bits) {
-            println!("[REJECTED] Block {} does not meet the difficulty target.", block.header.block_height);
-            return false;
+        let gap_secs = block.header.timestamp - tip_block.header.timestamp;
+        let fork2 = crate::consensus::fork2_active(block.header.block_height);
+        let parent_fine_val = crate::consensus::parent_fine(eng.state.difficulty_bits, block.header.block_height);
+        let eff_bits = if fork2 { 0 } else { crate::consensus::effective_difficulty_bits(eng.state.difficulty_bits, block.header.block_height, gap_secs) };
+        if fork2 {
+            let mtp = median_time_past(&db, eng.state.chain_height);
+            if !crate::consensus::fork2_timestamp_ok(block.header.timestamp, mtp, chrono::Utc::now().timestamp()) {
+                println!("[REJECTED] Block {} has an invalid timestamp (must be above the median of recent blocks and not too far ahead).", block.header.block_height);
+                return false;
+            }
+            let need = crate::consensus::required_fine(eng.state.difficulty_bits, block.header.block_height, gap_secs);
+            if !crate::consensus::meets_target(&block.header.calculate_pow_hash(), need) {
+                println!("[REJECTED] Block {} does not meet the difficulty target.", block.header.block_height);
+                return false;
+            }
+        } else {
+            if block.header.block_height >= crate::consensus::EMERGENCY_ACTIVATION_HEIGHT
+                && block.header.timestamp > chrono::Utc::now().timestamp() + 7200 {
+                println!("[REJECTED] Block {} has a timestamp too far in the future.", block.header.block_height);
+                return false;
+            }
+            if !meets_difficulty(&block.header.calculate_pow_hash(), eff_bits) {
+                println!("[REJECTED] Block {} does not meet the difficulty target.", block.header.block_height);
+                return false;
+            }
         }
 
         for tx in &block.transactions {
@@ -279,8 +316,13 @@ impl P2PNode {
         }
 
         eng.process_block_reward(block.header.miner.clone());
+        if fork2 {
+            eng.state.difficulty_bits = crate::consensus::next_fine(parent_fine_val, gap_secs);
+        } else {
+            eng.state.difficulty_bits = eff_bits;
+        }
 
-        if eng.state.chain_height % RETARGET_INTERVAL == 0 {
+        if !fork2 && eng.state.chain_height % RETARGET_INTERVAL == 0 {
             let first_height = eng.state.chain_height - RETARGET_INTERVAL;
             if first_height > 0 {
                 if let Ok(Some(first_bytes)) = db.get(format!("block_{}", first_height).as_bytes()) {
@@ -429,7 +471,8 @@ impl P2PNode {
                         if first_line.starts_with("GET /api/json") {
                             let eng = engine_clone.lock().await;
                             let current_height = eng.state.chain_height;
-                            let difficulty_bits = eng.state.difficulty_bits;
+                            let difficulty_fp = crate::consensus::parent_fine(eng.state.difficulty_bits, current_height + 1);
+                            let difficulty_bits = crate::consensus::ceil_bits(difficulty_fp);
 
                             // Real network hashrate, estimated the same way every
                             // major explorer does it: hashrate = 2^difficulty /
@@ -449,18 +492,19 @@ impl P2PNode {
                                         let elapsed_secs = (newest_block.header.timestamp - oldest_block.header.timestamp) as f64;
                                         if elapsed_secs > 0.0 {
                                             let avg_secs_per_block = elapsed_secs / window as f64;
-                                            estimated_hashrate = 2f64.powi(difficulty_bits as i32) / avg_secs_per_block;
+                                            estimated_hashrate = 2f64.powf(difficulty_fp as f64 / 65536.0) / avg_secs_per_block;
                                         }
                                     }
                                 }
                             }
 
                             let json_response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"status\":\"OPERATIONAL\",\"network\":\"QUANTUM-LATTICE\",\"total_supply_ql\":{:.8},\"chain_height\":{},\"active_database\":\"{}\",\"difficulty_bits\":{},\"estimated_network_hashrate\":{:.0}}}\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"status\":\"OPERATIONAL\",\"network\":\"QUANTUM-LATTICE\",\"total_supply_ql\":{:.8},\"chain_height\":{},\"active_database\":\"{}\",\"difficulty_bits\":{},\"difficulty_fp\":{},\"estimated_network_hashrate\":{:.0}}}\r\n",
                                 eng.state.total_minted_supply as f64 / COIN as f64,
                                 current_height,
                                 db_path_clone,
                                 difficulty_bits,
+                                difficulty_fp,
                                 estimated_hashrate
                             );
                             let _ = socket.write_all(json_response.as_bytes()).await;
@@ -809,15 +853,23 @@ impl P2PNode {
                             let tip_bytes = db_clone.get(tip_key.as_bytes()).unwrap().unwrap();
                             let tip_block: Block = deserialize(&tip_bytes).unwrap();
                             let prev_hash = tip_block.calculate_hash();
-                            let difficulty_bits = eng.state.difficulty_bits;
+                            let template_gap = chrono::Utc::now().timestamp() - tip_block.header.timestamp;
+                            let (difficulty_bits, difficulty_fp) = if crate::consensus::fork2_active(next_height) {
+                                let fine = crate::consensus::required_fine(eng.state.difficulty_bits, next_height, template_gap);
+                                (crate::consensus::ceil_bits(fine), fine)
+                            } else {
+                                let b = crate::consensus::effective_difficulty_bits(eng.state.difficulty_bits, next_height, template_gap);
+                                (b, b << crate::consensus::FP_SHIFT)
+                            };
                             drop(eng);
 
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"block_height\":{},\"previous_block_hash\":\"{}\",\"merkle_root\":\"{}\",\"version\":1,\"difficulty_bits\":{}}}\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"block_height\":{},\"previous_block_hash\":\"{}\",\"merkle_root\":\"{}\",\"version\":1,\"difficulty_bits\":{},\"difficulty_fp\":{}}}\r\n",
                                 next_height,
                                 hex::encode(&prev_hash),
                                 hex::encode(vec![0u8; 32]),
-                                difficulty_bits
+                                difficulty_bits,
+                                difficulty_fp
                             );
                             let _ = socket.write_all(response.as_bytes()).await;
 
@@ -857,8 +909,28 @@ impl P2PNode {
                                             };
                                             let pow_hash = candidate_header.calculate_pow_hash();
 
-                                            if !meets_difficulty(&pow_hash, eng.state.difficulty_bits) {
+                                            let fork2 = crate::consensus::fork2_active(next_height);
+                                            let tip_ts = tip_block.header.timestamp;
+                                            // Fork 2: the timestamp is fixed once, here, and used for both the
+                                            // difficulty rule and the block header, and is never at or below the
+                                            // median of recent blocks.
+                                            let block_ts: i64 = if fork2 {
+                                                std::cmp::max(tip_ts + seconds_since_last_block, median_time_past(&db_clone, eng.state.chain_height) + 1)
+                                            } else {
+                                                chrono::Utc::now().timestamp()
+                                            };
+                                            let parent_fine_val = crate::consensus::parent_fine(eng.state.difficulty_bits, next_height);
+                                            let gap_for_rule = block_ts - tip_ts;
+                                            let eff_bits = if fork2 { 0 } else { crate::consensus::effective_difficulty_bits(eng.state.difficulty_bits, next_height, seconds_since_last_block) };
+                                            let pow_ok = if fork2 {
+                                                crate::consensus::meets_target(&pow_hash, crate::consensus::required_fine(eng.state.difficulty_bits, next_height, gap_for_rule))
+                                            } else {
+                                                meets_difficulty(&pow_hash, eff_bits)
+                                            };
+                                            if !pow_ok {
                                                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"rejected\",\"reason\":\"does not meet difficulty target — template may be stale, refetch and retry\"}\r\n".to_string()
+                                            } else if fork2 && block_ts > chrono::Utc::now().timestamp() + crate::consensus::FORK2_FUTURE_LIMIT_SECS {
+                                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"rejected\",\"reason\":\"node clock is behind recent block timestamps - try again shortly\",\"retry_after_secs\":30}\r\n".to_string()
                                             } else {
                                                 let mut pending = mempool_clone.lock().await;
                                                 let mut accepted = Vec::new();
@@ -871,12 +943,17 @@ impl P2PNode {
                                                 drop(pending);
 
                                                 eng.process_block_reward(miner_bytes.clone());
+                                                if fork2 {
+                                                    eng.state.difficulty_bits = crate::consensus::next_fine(parent_fine_val, gap_for_rule);
+                                                } else {
+                                                    eng.state.difficulty_bits = eff_bits;
+                                                }
 
                                                 let final_header = BlockHeader {
                                                     version: 1,
                                                     previous_block_hash: prev_hash,
                                                     merkle_root: vec![0; 32],
-                                                    timestamp: chrono::Utc::now().timestamp(),
+                                                    timestamp: block_ts,
                                                     block_height: eng.state.chain_height,
                                                     miner: miner_bytes,
                                                     nonce,
@@ -884,7 +961,7 @@ impl P2PNode {
                                                 let block = Block { header: final_header, transactions: accepted };
                                                 let block_hash = block.calculate_hash();
 
-                                                if eng.state.chain_height % RETARGET_INTERVAL == 0 {
+                                                if !fork2 && eng.state.chain_height % RETARGET_INTERVAL == 0 {
                                                     let first_height = eng.state.chain_height - RETARGET_INTERVAL;
                                                     if first_height > 0 {
                                                     if let Ok(Some(first_bytes)) = db_clone.get(format!("block_{}", first_height).as_bytes()) {
@@ -900,12 +977,12 @@ impl P2PNode {
                                                 db_clone.put(STATE_KEY, serialize(&eng.state).unwrap()).unwrap();
 
                                                 println!(
-                                                    "[MINED] Block {} accepted from external miner {} | Hash {} | Txs {} | Difficulty {} bits",
+                                                    "[MINED] Block {} accepted from external miner {} | Hash {} | Txs {} | Next difficulty {:.3} bits",
                                                     eng.state.chain_height,
                                                     m_hex,
                                                     hex::encode(&block_hash),
                                                     block.transactions.len(),
-                                                    eng.state.difficulty_bits
+                                                    if fork2 { eng.state.difficulty_bits as f64 / 65536.0 } else { eng.state.difficulty_bits as f64 }
                                                 );
 
                                                 drop(eng);
@@ -1112,8 +1189,7 @@ impl P2PNode {
                                 ));
                             }
                             let json_response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"count\":{},\"users\":[{}]}}\r\n",
-                                accounts.len(),
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"count\":{},\"users\":[{}]}}\r\n",                               accounts.len(),
                                 items.join(",")
                             );
                             let _ = socket.write_all(json_response.as_bytes()).await;
