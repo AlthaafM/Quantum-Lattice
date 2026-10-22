@@ -450,6 +450,8 @@ struct SharedState {
     all_time_blocks_found: Mutex<u64>,
     all_time_ql_distributed: Mutex<f64>,
     all_time_manual_rewards: Mutex<u64>,
+    payments: Mutex<Vec<Payment>>,
+    payments_updated: Mutex<i64>,
 }
 
 // ---------------------------------------------------------------------
@@ -517,7 +519,10 @@ fn handle_miner_connection(
 
     } else if first_line.starts_with("POST /pool/submit") {
         let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-        let contributor_hex = extract_json_string(body, "miner");
+        // Only well-formed addresses may earn shares (a bad string would otherwise dilute everyone's payout).
+        let contributor_hex = extract_json_string(body, "miner")
+            .filter(|m| m.len() == 3904 && m.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|m| m.to_lowercase());
         let nonce = extract_json_number(body, "nonce");
 
         let response = match (contributor_hex.clone(), nonce) {
@@ -608,6 +613,60 @@ fn handle_miner_connection(
             "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\nLocal machine only.\r\n".to_string()
         } else {
             repay_from_file(&node_address, pool_seed, &pool_pk, &pool_pk_hex)
+        };
+        let _ = stream.write_all(resp.as_bytes());
+
+    } else if first_line.starts_with("GET /pool/payments/recent") {
+        // Latest payout rounds + top earners, read from the chain (see refresh_payments).
+        let body = {
+            let rows = state.payments.lock().unwrap();
+            let updated = *state.payments_updated.lock().unwrap();
+            build_recent_payments_json(&rows, updated)
+        };
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}\r\n",
+            body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+
+    } else if first_line.starts_with("GET /pool/payments/round") || first_line.starts_with("GET /pool/payments/older") {
+        // Round lookup by block number (?block=N) or paging backwards (?before=N).
+        let is_lookup = first_line.starts_with("GET /pool/payments/round");
+        let key = if is_lookup { "block" } else { "before" };
+        let resp = match query_param(first_line, key).and_then(|v| v.parse::<u64>().ok()) {
+            Some(n) => {
+                let rows = state.payments.lock().unwrap();
+                let body = if is_lookup {
+                    build_rounds_json(&rows, Some(n), None, 1)
+                } else {
+                    build_rounds_json(&rows, None, Some(n), 10)
+                };
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}\r\n",
+                    body
+                )
+            }
+            None => format!(
+                "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"error\":\"Expected ?{}= with a block number.\"}}\r\n",
+                key
+            ),
+        };
+        let _ = stream.write_all(resp.as_bytes());
+
+    } else if first_line.starts_with("GET /pool/payments") {
+        // Everything one address has been paid by the pool.
+        let resp = match payments_query_address(first_line) {
+            Some(addr) if addr.len() == 3904 => {
+                let rows = state.payments.lock().unwrap();
+                match build_address_payments_json(&rows, &addr) {
+                    Some(b) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}\r\n",
+                        b
+                    ),
+                    None => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Address must be hex.\"}\r\n".to_string(),
+                }
+            }
+            _ => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Expected ?address= with a full 3904-character hex address.\"}\r\n".to_string(),
         };
         let _ = stream.write_all(resp.as_bytes());
 
@@ -790,8 +849,12 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
         std::mem::take(&mut *shares)
     };
     *state.round_start_time.lock().unwrap() = chrono::Utc::now().timestamp();
+    save_shares_to("pool_shares.txt", state);
 
     let total_shares: u64 = round_shares.values().sum();
+    if total_shares > 0 {
+        save_last_round(&round_shares);
+    }
     if total_shares == 0 {
         println!("[POOL] No tracked shares this round — nothing to pay out.");
         return;
@@ -953,6 +1016,484 @@ fn repay_from_file(node_address: &str, pool_seed: [u8; 32], pool_pk: &[u8], pool
     http("200 OK", &format!("{{\"status\":\"done\",\"queued\":{}}}", sent))
 }
 
+// ---------------------------------------------------------------------
+// On-chain payout history. The pool's payouts are ordinary transactions
+// SENT by the pool address, so the node already has the complete record.
+// The pool re-reads it every couple of minutes and serves two views:
+//   GET /pool/payments/recent          latest payout rounds, who got what, top earners
+//   GET /pool/payments?address=HEX     everything one address has been paid
+//   GET /pool/payments/round?block=N   the payout round recorded in block N
+//   GET /pool/payments/older?before=N  the 10 payout rounds before block N
+// Nothing here is stored on disk: it is rebuilt from the chain, so it
+// includes every past payout (manual rounds and repayments too) and cannot
+// drift from the real ledger. Addresses are kept as a short label plus a
+// SHA3 hash (for lookups), so memory stays small however long the history.
+// ---------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Payment {
+    block_height: u64,
+    timestamp: i64,
+    receiver_hash: [u8; 32],
+    receiver_short: String,
+    amount_ql: f64,
+}
+
+fn short_hex(h: &str) -> String {
+    if h.len() <= 28 {
+        h.to_string()
+    } else {
+        format!("{}...{}", &h[..16], &h[h.len() - 8..])
+    }
+}
+
+fn address_hash(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&out);
+    a
+}
+
+/// Parses the node's /api/transactions response body, keeping only payments
+/// the pool SENT. Newest first, as the node returns them.
+fn parse_payments(body: &str) -> Vec<Payment> {
+    let starts: Vec<usize> = body.match_indices("{\"direction\":").map(|(i, _)| i).collect();
+    let mut rows: Vec<Payment> = Vec::new();
+    for (n, &s) in starts.iter().enumerate() {
+        let e = if n + 1 < starts.len() { starts[n + 1] } else { body.len() };
+        let seg = &body[s..e];
+        if extract_json_string(seg, "direction").as_deref() != Some("sent") {
+            continue;
+        }
+        let counterparty = match extract_json_string(seg, "counterparty") {
+            Some(c) => c,
+            None => continue,
+        };
+        let bytes = match hex::decode(&counterparty) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        rows.push(Payment {
+            block_height: extract_json_number(seg, "block_height").unwrap_or(0),
+            timestamp: extract_json_number(seg, "timestamp").unwrap_or(0) as i64,
+            receiver_hash: address_hash(&bytes),
+            receiver_short: short_hex(&counterparty),
+            amount_ql: extract_json_float(seg, "amount_ql").unwrap_or(0.0),
+        });
+    }
+    // stable sort: newest block first, rows of one block stay together
+    rows.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+    rows
+}
+
+fn refresh_payments(node_address: &str, pool_pk_hex: &str, state: &Arc<SharedState>) {
+    let resp = match http_get(node_address, &format!("/api/transactions?address={}", pool_pk_hex)) {
+        Some(r) => r,
+        None => {
+            println!("[POOL] Could not reach node to refresh payout history.");
+            return;
+        }
+    };
+    if !resp.starts_with("HTTP/1.1 200") {
+        println!("[POOL] Node did not return payout history (non-200) — keeping the previous copy.");
+        return;
+    }
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+    let rows = parse_payments(body);
+    let count = rows.len();
+    *state.payments.lock().unwrap() = rows;
+    *state.payments_updated.lock().unwrap() = chrono::Utc::now().timestamp();
+    println!("[{}] [POOL] Payout history refreshed from chain: {} payment(s).", now(), count);
+}
+
+/// Latest payout rounds (one round = all payments in one block), with who got
+/// what, plus all-time totals and the top earners.
+fn build_recent_payments_json(rows: &[Payment], updated: i64) -> String {
+    let mut rounds: Vec<(u64, i64, f64, Vec<(&str, f64)>)> = Vec::new();
+    for r in rows {
+        let new_round = match rounds.last() {
+            Some(l) => l.0 != r.block_height,
+            None => true,
+        };
+        if new_round {
+            if rounds.len() >= 10 {
+                break;
+            }
+            rounds.push((r.block_height, r.timestamp, r.amount_ql, vec![(r.receiver_short.as_str(), r.amount_ql)]));
+        } else {
+            let l = rounds.last_mut().unwrap();
+            l.2 += r.amount_ql;
+            l.3.push((r.receiver_short.as_str(), r.amount_ql));
+        }
+    }
+
+    let mut total_paid = 0.0f64;
+    let mut total_rounds = 0u64;
+    let mut last_block: Option<u64> = None;
+    let mut by_addr: HashMap<[u8; 32], (String, f64, u64)> = HashMap::new();
+    for r in rows {
+        total_paid += r.amount_ql;
+        if last_block != Some(r.block_height) {
+            total_rounds += 1;
+            last_block = Some(r.block_height);
+        }
+        let e = by_addr.entry(r.receiver_hash).or_insert((r.receiver_short.clone(), 0.0, 0));
+        e.1 += r.amount_ql;
+        e.2 += 1;
+    }
+    let mut top: Vec<(String, f64, u64)> = by_addr.into_values().collect();
+    top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    top.truncate(10);
+
+    let rounds_json: Vec<String> = rounds
+        .iter()
+        .map(|(bh, ts, total, pays)| {
+            let p: Vec<String> = pays
+                .iter()
+                .map(|(a, amt)| format!("{{\"address\":\"{}\",\"amount_ql\":{:.4}}}", a, amt))
+                .collect();
+            format!(
+                "{{\"block_height\":{},\"timestamp\":{},\"total_ql\":{:.4},\"payments\":[{}]}}",
+                bh, ts, total, p.join(",")
+            )
+        })
+        .collect();
+    let top_json: Vec<String> = top
+        .iter()
+        .map(|(a, t, n)| format!("{{\"address\":\"{}\",\"total_ql\":{:.4},\"payments\":{}}}", a, t, n))
+        .collect();
+
+    format!(
+        "{{\"updated\":{},\"total_payments\":{},\"total_rounds\":{},\"total_paid_ql\":{:.4},\"rounds\":[{}],\"top\":[{}]}}",
+        updated, rows.len(), total_rounds, total_paid, rounds_json.join(","), top_json.join(",")
+    )
+}
+
+/// Everything one address has been paid (newest 200 shown, totals cover all).
+fn build_address_payments_json(rows: &[Payment], address_hex: &str) -> Option<String> {
+    let bytes = hex::decode(address_hex).ok()?;
+    let target = address_hash(&bytes);
+    let mut total = 0.0f64;
+    let mut count = 0u64;
+    let mut items: Vec<String> = Vec::new();
+    for r in rows.iter().filter(|r| r.receiver_hash == target) {
+        total += r.amount_ql;
+        count += 1;
+        if items.len() < 200 {
+            items.push(format!(
+                "{{\"block_height\":{},\"timestamp\":{},\"amount_ql\":{:.4}}}",
+                r.block_height, r.timestamp, r.amount_ql
+            ));
+        }
+    }
+    Some(format!(
+        "{{\"count\":{},\"total_ql\":{:.4},\"payments\":[{}]}}",
+        count, total, items.join(",")
+    ))
+}
+
+fn query_param(first_line: &str, key: &str) -> Option<String> {
+    let path = first_line.split_whitespace().nth(1)?;
+    let query = path.split('?').nth(1)?;
+    for pair in query.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next()? == key {
+            return Some(kv.next().unwrap_or("").trim().to_string());
+        }
+    }
+    None
+}
+
+/// Payout rounds, newest first. `block` keeps only that block; `before` keeps only
+/// blocks older than it; at most `limit` rounds. "more" says whether older ones exist.
+fn build_rounds_json(rows: &[Payment], block: Option<u64>, before: Option<u64>, limit: usize) -> String {
+    let mut rounds: Vec<(u64, i64, f64, Vec<(&str, f64)>)> = Vec::new();
+    let mut more = false;
+    for r in rows {
+        if let Some(b) = block {
+            if r.block_height != b {
+                continue;
+            }
+        }
+        if let Some(b) = before {
+            if r.block_height >= b {
+                continue;
+            }
+        }
+        let new_round = match rounds.last() {
+            Some(l) => l.0 != r.block_height,
+            None => true,
+        };
+        if new_round {
+            if rounds.len() >= limit {
+                more = true;
+                break;
+            }
+            rounds.push((r.block_height, r.timestamp, r.amount_ql, vec![(r.receiver_short.as_str(), r.amount_ql)]));
+        } else {
+            let l = rounds.last_mut().unwrap();
+            l.2 += r.amount_ql;
+            l.3.push((r.receiver_short.as_str(), r.amount_ql));
+        }
+    }
+    let items: Vec<String> = rounds
+        .iter()
+        .map(|(bh, ts, total, pays)| {
+            let p: Vec<String> = pays
+                .iter()
+                .map(|(a, amt)| format!("{{\"address\":\"{}\",\"amount_ql\":{:.4}}}", a, amt))
+                .collect();
+            format!(
+                "{{\"block_height\":{},\"timestamp\":{},\"total_ql\":{:.4},\"payments\":[{}]}}",
+                bh, ts, total, p.join(",")
+            )
+        })
+        .collect();
+    format!("{{\"rounds\":[{}],\"more\":{}}}", items.join(","), more)
+}
+
+fn payments_query_address(first_line: &str) -> Option<String> {
+    let path = first_line.split_whitespace().nth(1)?;
+    let query = path.split('?').nth(1)?;
+    for pair in query.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next()? == "address" {
+            return Some(kv.next().unwrap_or("").trim().to_lowercase());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod payments_tests {
+    use super::*;
+
+    fn addr(c: char) -> String {
+        std::iter::repeat(c).take(3904).collect()
+    }
+
+    // Same shape the node's /api/transactions returns (newest first).
+    fn sample_body() -> String {
+        let a = addr('a');
+        let b = addr('b');
+        let pool = addr('c');
+        format!(
+            "{{\"address\":\"{p}\",\"transactions\":[\
+{{\"direction\":\"sent\",\"counterparty\":\"{b}\",\"amount_ql\":16.00000000,\"block_height\":300,\"timestamp\":3000}},\
+{{\"direction\":\"sent\",\"counterparty\":\"{a}\",\"amount_ql\":32.00000000,\"block_height\":300,\"timestamp\":3000}},\
+{{\"direction\":\"received\",\"counterparty\":\"{b}\",\"amount_ql\":5.00000000,\"block_height\":250,\"timestamp\":2500}},\
+{{\"direction\":\"sent\",\"counterparty\":\"{a}\",\"amount_ql\":8.50000000,\"block_height\":200,\"timestamp\":2000}}\
+]}}",
+            p = pool, a = a, b = b
+        )
+    }
+
+    #[test]
+    fn parses_only_sent_payments() {
+        let rows = parse_payments(&sample_body());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].block_height, 300);
+        assert_eq!(rows[2].block_height, 200);
+        assert!((rows[1].amount_ql - 32.0).abs() < 1e-9);
+        assert_eq!(rows[1].receiver_short, short_hex(&addr('a')));
+    }
+
+    #[test]
+    fn recent_groups_rounds_and_totals() {
+        let rows = parse_payments(&sample_body());
+        let j = build_recent_payments_json(&rows, 12345);
+        assert!(j.contains("\"total_payments\":3"));
+        assert!(j.contains("\"total_rounds\":2"));
+        assert!(j.contains("\"total_paid_ql\":56.5000"));
+        // first round = block 300 = 48 QL across two payments
+        assert!(j.contains("\"block_height\":300,\"timestamp\":3000,\"total_ql\":48.0000"));
+        // top earner is address 'a' (32 + 8.5)
+        assert!(j.contains(&format!("\"address\":\"{}\",\"total_ql\":40.5000,\"payments\":2", short_hex(&addr('a')))));
+    }
+
+    #[test]
+    fn address_lookup() {
+        let rows = parse_payments(&sample_body());
+        let j = build_address_payments_json(&rows, &addr('a')).unwrap();
+        assert!(j.contains("\"count\":2"));
+        assert!(j.contains("\"total_ql\":40.5000"));
+        let none = build_address_payments_json(&rows, &addr('d')).unwrap();
+        assert!(none.contains("\"count\":0"));
+        assert!(build_address_payments_json(&rows, "zz").is_none());
+    }
+
+    #[test]
+    fn query_parsing() {
+        let l = "GET /pool/payments?address=ABCD1234 HTTP/1.1";
+        assert_eq!(query_param("GET /pool/payments/round?block=77 HTTP/1.1", "block"), Some("77".to_string()));
+        assert_eq!(query_param("GET /pool/payments/round HTTP/1.1", "block"), None);
+        assert_eq!(payments_query_address(l).unwrap(), "abcd1234");
+        assert!(payments_query_address("GET /pool/payments HTTP/1.1").is_none());
+    }
+}
+
+// ---------------------------------------------------------------------
+// Round-share protection. The shares of the current round used to live only
+// in memory, so restarting the pool wiped everyone's progress since the last
+// win. Now:
+//   pool_shares.txt         live snapshot, rewritten every 20 seconds and
+//                           reloaded on start (a restart loses at most 20s)
+//   last_round_shares.txt   written just before each payout, in the exact
+//                           "address,shares" format repay.txt uses, so a lost
+//                           payout can be replayed with no hand-building
+// ---------------------------------------------------------------------
+
+fn shares_file_contents(shares: &HashMap<String, u64>, round_start: i64) -> String {
+    let mut content = format!("round_start={}\n", round_start);
+    for (addr, count) in shares.iter() {
+        // only well-formed addresses are ever written (keeps the file unambiguous)
+        if addr.bytes().all(|b| b.is_ascii_hexdigit()) {
+            content.push_str(&format!("{},{}\n", addr, count));
+        }
+    }
+    content
+}
+
+fn parse_shares_file(content: &str) -> (HashMap<String, u64>, Option<i64>) {
+    let mut map: HashMap<String, u64> = HashMap::new();
+    let mut round_start: Option<i64> = None;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("round_start=") {
+            round_start = rest.trim().parse::<i64>().ok();
+        } else if let Some((addr, n)) = line.split_once(',') {
+            let addr = addr.trim();
+            if let Ok(c) = n.trim().parse::<u64>() {
+                if !addr.is_empty() && addr.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    map.insert(addr.to_lowercase(), c);
+                }
+            }
+        }
+    }
+    (map, round_start)
+}
+
+fn write_atomic(path: &str, content: &str) -> bool {
+    let tmp = format!("{}.tmp", path);
+    if std::fs::write(&tmp, content).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp, path).is_ok()
+}
+
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+fn save_shares_to(path: &str, state: &Arc<SharedState>) {
+    // Held across the read AND the write, so the 20-second saver and the
+    // payout saver can never interleave and leave an out-of-date file behind.
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let shares = state.shares.lock().unwrap().clone();
+    let round_start = *state.round_start_time.lock().unwrap();
+    if !write_atomic(path, &shares_file_contents(&shares, round_start)) {
+        println!("[POOL] Warning: could not save round shares to {}.", path);
+    }
+}
+
+fn load_shares_from(path: &str, state: &Arc<SharedState>) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("[POOL] No saved round shares found — starting this round empty.");
+            return;
+        }
+    };
+    let (map, round_start) = parse_shares_file(&content);
+    let total: u64 = map.values().sum();
+    println!(
+        "[POOL] Restored this round's shares from {}: {} contributor(s), {} share(s).",
+        path, map.len(), total
+    );
+    *state.shares.lock().unwrap() = map;
+    if let Some(rs) = round_start {
+        *state.round_start_time.lock().unwrap() = rs;
+    }
+}
+
+/// Written just before a payout is processed — same format as repay.txt.
+fn save_last_round(round_shares: &HashMap<String, u64>) {
+    let mut content = String::new();
+    for (addr, count) in round_shares.iter() {
+        content.push_str(&format!("{},{}\n", addr, count));
+    }
+    if !write_atomic("last_round_shares.txt", &content) {
+        println!("[POOL] Warning: could not write last_round_shares.txt.");
+    }
+}
+
+#[cfg(test)]
+impl SharedState {
+    fn for_tests() -> Self {
+        SharedState {
+            template: Mutex::new(None),
+            shares: Mutex::new(HashMap::new()),
+            payout_history: Mutex::new(Vec::new()),
+            round_start_time: Mutex::new(0),
+            all_time_blocks_found: Mutex::new(0),
+            all_time_ql_distributed: Mutex::new(0.0),
+            all_time_manual_rewards: Mutex::new(0),
+            payments: Mutex::new(Vec::new()),
+            payments_updated: Mutex::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod shares_tests {
+    use super::*;
+
+    fn addr(c: char) -> String {
+        std::iter::repeat(c).take(3904).collect()
+    }
+
+    #[test]
+    fn round_trip_in_memory() {
+        let mut m = HashMap::new();
+        m.insert(addr('a'), 80157u64);
+        m.insert(addr('b'), 33698u64);
+        let text = shares_file_contents(&m, 1_700_000_000);
+        let (back, rs) = parse_shares_file(&text);
+        assert_eq!(back, m);
+        assert_eq!(rs, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn junk_and_injection_are_ignored() {
+        let mut m = HashMap::new();
+        m.insert("zz\nround_start=0".to_string(), 5u64); // not hex -> never written
+        m.insert(addr('c'), 7u64);
+        let text = shares_file_contents(&m, 42);
+        let (back, rs) = parse_shares_file(&text);
+        assert_eq!(back.len(), 1);
+        assert_eq!(rs, Some(42));
+        // garbage lines in a hand-edited file are skipped, not fatal
+        let (b2, _) = parse_shares_file("round_start=9\nnot a line\nabc,notanumber\nAB12,3\n,4\n");
+        assert_eq!(b2.get("ab12"), Some(&3u64));
+        assert_eq!(b2.len(), 1);
+    }
+
+    #[test]
+    fn file_round_trip() {
+        let path = std::env::temp_dir().join(format!("ql_pool_shares_test_{}.txt", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let state = Arc::new(SharedState::for_tests());
+        state.shares.lock().unwrap().insert(addr('d'), 11);
+        *state.round_start_time.lock().unwrap() = 777;
+        save_shares_to(&path, &state);
+        state.shares.lock().unwrap().clear();
+        *state.round_start_time.lock().unwrap() = 1;
+        load_shares_from(&path, &state);
+        assert_eq!(state.shares.lock().unwrap().get(&addr('d')), Some(&11u64));
+        assert_eq!(*state.round_start_time.lock().unwrap(), 777);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 fn print_usage_and_exit() -> ! {
     eprintln!("=== QUANTUM-LATTICE (QL) MINING POOL ===");
     eprintln!();
@@ -1058,8 +1599,11 @@ fn main() {
         all_time_blocks_found: Mutex::new(0),
         all_time_ql_distributed: Mutex::new(0.0),
         all_time_manual_rewards: Mutex::new(0),
+        payments: Mutex::new(Vec::new()),
+        payments_updated: Mutex::new(0),
     });
     load_persistent_state(&state);
+    load_shares_from("pool_shares.txt", &state);
 
     // Background thread: keeps the shared template current by periodically
     // re-fetching from the real node. The pool itself never grinds nonces —
@@ -1073,6 +1617,30 @@ fn main() {
             loop {
                 refresh_template(&node_address, &state);
                 thread::sleep(Duration::from_secs(5));
+            }
+        });
+    }
+
+    // Background thread: snapshots this round's shares every 20 seconds.
+    {
+        let state = state.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(20));
+                save_shares_to("pool_shares.txt", &state);
+            }
+        });
+    }
+
+    // Background thread: re-reads the pool's own payout history from the chain.
+    {
+        let state = state.clone();
+        let node_address = node_address.clone();
+        let pool_pk_hex = pool_pk_hex.clone();
+        thread::spawn(move || {
+            loop {
+                refresh_payments(&node_address, &pool_pk_hex, &state);
+                thread::sleep(Duration::from_secs(120));
             }
         });
     }
