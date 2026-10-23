@@ -22,6 +22,10 @@ impl RateLimiter {
     pub async fn check(&self, key: &str, max_count: u32, window_secs: u64) -> bool {
         let mut map = self.windows.lock().await;
         let now = Instant::now();
+        // Keep memory bounded: forget keys untouched for over two hours.
+        if map.len() > 20_000 {
+            map.retain(|_, (_, started)| now.duration_since(*started).as_secs() < 7200);
+        }
         let entry = map.entry(key.to_string()).or_insert((0, now));
 
         if now.duration_since(entry.1).as_secs() > window_secs {
