@@ -117,6 +117,41 @@ const MAX_BLOCKS_PER_RESPONSE: u64 = 100;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Simultaneous P2P connections allowed from one IP address.
 const MAX_P2P_CONNS_PER_IP: usize = 8;
+/// Most unconfirmed transactions the node will hold at once.
+const MAX_MEMPOOL_TXS: usize = 2000;
+/// Transaction submissions allowed per minute from one outside address.
+const MAX_TX_SUBMITS_PER_MIN: u32 = 60;
+
+/// The address a request really came from. Requests arriving through our own
+/// Cloudflare tunnel connect from loopback and carry the visitor's address in the
+/// CF-Connecting-IP header; that header is trusted ONLY when the TCP peer is loopback,
+/// so an outside client cannot forge it.
+fn real_client_ip(request: &str, peer_ip: &str) -> String {
+    let peer_is_loopback = peer_ip
+        .parse::<std::net::IpAddr>()
+        .map(|a| a.is_loopback())
+        .unwrap_or(false);
+    if !peer_is_loopback {
+        return peer_ip.to_string();
+    }
+    for line in request.lines() {
+        if line.is_empty() {
+            break; // end of headers
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("cf-connecting-ip") {
+                if let Ok(ip) = value.trim().parse::<std::net::IpAddr>() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    peer_ip.to_string()
+}
+
+fn is_loopback_str(ip: &str) -> bool {
+    ip.parse::<std::net::IpAddr>().map(|a| a.is_loopback()).unwrap_or(false)
+}
 
 type IpCounts = Arc<std::sync::Mutex<HashMap<String, usize>>>;
 
@@ -542,6 +577,7 @@ impl P2PNode {
                         if request_str.is_empty() {
                             return;
                         }
+                        let client_ip = real_client_ip(&request_str, &client_ip);
                         let first_line = request_str.lines().next().unwrap_or("");
 
                         if first_line.starts_with("OPTIONS") {
@@ -788,9 +824,32 @@ impl P2PNode {
                                 (Some(s_hex), Some(r_hex), Some(sig_hex), Some(amt)) => {
                                     match (hex::decode(&s_hex), hex::decode(&r_hex), hex::decode(&sig_hex)) {
                                         (Ok(sender), Ok(receiver), Ok(signature)) => {
-                                            let tx = Transaction::new(sender, receiver, amt, signature);
-                                            mempool_clone.lock().await.push(tx);
-                                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"status\":\"queued\",\"note\":\"included when a miner produces the next block\"}\r\n".to_string()
+                                            let rate_ok = is_loopback_str(&client_ip)
+                                                || rate_limiter_clone.check(&format!("tx-ip:{}", client_ip), MAX_TX_SUBMITS_PER_MIN, 60).await;
+                                            let mut message = Vec::with_capacity(sender.len() + receiver.len() + 8);
+                                            message.extend_from_slice(&sender);
+                                            message.extend_from_slice(&receiver);
+                                            message.extend_from_slice(&amt.to_le_bytes());
+                                            if !rate_ok {
+                                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Too many transactions submitted - slow down.\"}\r\n".to_string()
+                                            } else if amt == 0 || !crate::wallet::verify_signature(&sender, &message, &signature) {
+                                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Invalid signature or amount\"}\r\n".to_string()
+                                            } else if engine_clone.lock().await.balance_of(&sender) < amt {
+                                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Insufficient balance\"}\r\n".to_string()
+                                            } else {
+                                                let mut pool = mempool_clone.lock().await;
+                                                let already = pool.iter().any(|t| {
+                                                    t.sender == sender && t.receiver == receiver && t.amount == amt && t.signature == signature
+                                                });
+                                                if !already && pool.len() >= MAX_MEMPOOL_TXS {
+                                                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Transaction queue is full - try again shortly.\"}\r\n".to_string()
+                                                } else {
+                                                    if !already {
+                                                        pool.push(Transaction::new(sender, receiver, amt, signature));
+                                                    }
+                                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"status\":\"queued\",\"note\":\"included when a miner produces the next block\"}\r\n".to_string()
+                                                }
+                                            }
                                         }
                                         _ => "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Fields must be valid hex\"}\r\n".to_string(),
                                     }
@@ -1337,6 +1396,22 @@ impl P2PNode {
 #[cfg(test)]
 mod hardening_tests {
     use super::*;
+
+    #[test]
+    fn client_ip_trusts_the_tunnel_header_only_from_loopback() {
+        let req = "GET / HTTP/1.1\r\nHost: x\r\nCF-Connecting-IP: 203.0.113.7\r\n\r\n";
+        // via our own tunnel (loopback peer): use the visitor's address
+        assert_eq!(real_client_ip(req, "127.0.0.1"), "203.0.113.7");
+        // an outside client cannot forge the header
+        assert_eq!(real_client_ip(req, "198.51.100.9"), "198.51.100.9");
+        // no header, or junk in it: fall back to the peer
+        assert_eq!(real_client_ip("GET / HTTP/1.1\r\n\r\n", "127.0.0.1"), "127.0.0.1");
+        let junk = "GET / HTTP/1.1\r\ncf-connecting-ip: not-an-ip\r\n\r\n";
+        assert_eq!(real_client_ip(junk, "127.0.0.1"), "127.0.0.1");
+        // a header in the body does not count
+        let body = "POST / HTTP/1.1\r\n\r\ncf-connecting-ip: 1.2.3.4\r\n";
+        assert_eq!(real_client_ip(body, "127.0.0.1"), "127.0.0.1");
+    }
 
     #[test]
     fn ip_slots_are_limited_and_released() {
