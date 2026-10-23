@@ -39,7 +39,7 @@
 // improvement worth building later, not present in this version.
 
 use sha3::{Digest, Sha3_256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -452,6 +452,8 @@ struct SharedState {
     all_time_manual_rewards: Mutex<u64>,
     payments: Mutex<Vec<Payment>>,
     payments_updated: Mutex<i64>,
+    /// (template id, nonces already credited for it) - stops one valid share being credited repeatedly.
+    seen_shares: Mutex<(Vec<u8>, HashSet<u64>)>,
 }
 
 // ---------------------------------------------------------------------
@@ -541,6 +543,12 @@ fn handle_miner_connection(
 
                         if !meets_difficulty(&hash, t.pool_difficulty_bits) {
                             "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n{\"status\":\"rejected\",\"reason\":\"does not meet pool difficulty\"}\r\n".to_string()
+                        } else if {
+                            let mut template_id = t.block_height.to_le_bytes().to_vec();
+                            template_id.extend_from_slice(&t.previous_block_hash);
+                            !claim_share(&state.seen_shares, &template_id, nonce)
+                        } {
+                            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n{\"status\":\"rejected\",\"reason\":\"duplicate share\"}\r\n".to_string()
                         } else {
                             {
                                 let mut shares = state.shares.lock().unwrap();
@@ -1439,7 +1447,24 @@ impl SharedState {
             all_time_manual_rewards: Mutex::new(0),
             payments: Mutex::new(Vec::new()),
             payments_updated: Mutex::new(0),
+            seen_shares: Mutex::new((Vec::new(), HashSet::new())),
         }
+    }
+}
+
+#[cfg(test)]
+mod duplicate_share_tests {
+    use super::*;
+
+    #[test]
+    fn a_share_counts_once_per_template() {
+        let seen = Mutex::new((Vec::new(), HashSet::new()));
+        assert!(claim_share(&seen, b"tpl-1", 42));
+        assert!(!claim_share(&seen, b"tpl-1", 42), "replay must be refused");
+        assert!(claim_share(&seen, b"tpl-1", 43), "a different nonce is fine");
+        // new template: the same nonce is a different share again
+        assert!(claim_share(&seen, b"tpl-2", 42));
+        assert!(!claim_share(&seen, b"tpl-2", 42));
     }
 }
 
@@ -1492,6 +1517,17 @@ mod shares_tests {
         assert_eq!(*state.round_start_time.lock().unwrap(), 777);
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// True the first time a nonce is seen for a given template, false for any repeat.
+/// The set is cleared whenever the template (block height + previous hash) changes.
+fn claim_share(seen: &Mutex<(Vec<u8>, HashSet<u64>)>, template_id: &[u8], nonce: u64) -> bool {
+    let mut guard = seen.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.0 != template_id {
+        guard.0 = template_id.to_vec();
+        guard.1.clear();
+    }
+    guard.1.insert(nonce)
 }
 
 fn print_usage_and_exit() -> ! {
@@ -1601,6 +1637,7 @@ fn main() {
         all_time_manual_rewards: Mutex::new(0),
         payments: Mutex::new(Vec::new()),
         payments_updated: Mutex::new(0),
+        seen_shares: Mutex::new((Vec::new(), HashSet::new())),
     });
     load_persistent_state(&state);
     load_shares_from("pool_shares.txt", &state);
