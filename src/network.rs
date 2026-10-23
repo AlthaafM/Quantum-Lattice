@@ -109,6 +109,48 @@ fn median_time_past(db: &DB, tip_height: u64) -> i64 {
     crate::consensus::median_of(ts)
 }
 
+/// Largest request body the web/API port will accept (blocks and transactions are far smaller).
+const MAX_HTTP_BODY: usize = 1024 * 1024;
+/// A peer asking for blocks gets at most this many per reply (it asks again for the rest).
+const MAX_BLOCKS_PER_RESPONSE: u64 = 100;
+/// ...and never more than this many bytes of block data in one reply.
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Simultaneous P2P connections allowed from one IP address.
+const MAX_P2P_CONNS_PER_IP: usize = 8;
+
+type IpCounts = Arc<std::sync::Mutex<HashMap<String, usize>>>;
+
+/// Releases an IP's connection slot when dropped (also on panic or early return).
+struct IpGuard {
+    map: IpCounts,
+    ip: String,
+}
+
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = m.get_mut(&self.ip) {
+            if *c <= 1 {
+                m.remove(&self.ip);
+            } else {
+                *c -= 1;
+            }
+        }
+    }
+}
+
+fn try_ip_guard(map: &IpCounts, ip: &str, max: usize) -> Option<IpGuard> {
+    {
+        let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+        let c = m.entry(ip.to_string()).or_insert(0);
+        if *c >= max {
+            return None;
+        }
+        *c += 1;
+    }
+    Some(IpGuard { map: map.clone(), ip: ip.to_string() })
+}
+
 async fn read_http_request(socket: &mut TcpStream) -> String {
     let read_future = async {
         let mut data: Vec<u8> = Vec::new();
@@ -128,6 +170,11 @@ async fn read_http_request(socket: &mut TcpStream) -> String {
                             .and_then(|v| v.trim().parse::<usize>().ok())
                             .unwrap_or(0);
 
+                        if content_length > MAX_HTTP_BODY {
+                            // Oversized request: throw it away instead of buffering it.
+                            data.clear();
+                            break;
+                        }
                         if data.len() - header_end >= content_length {
                             break;
                         }
@@ -171,8 +218,16 @@ impl P2PNode {
             ));
         }
 
-        let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf).await?;
+        // Grow the buffer as bytes actually arrive instead of reserving the whole
+        // claimed size up front (a liar claiming 16 MB would otherwise tie it up).
+        let mut buf = Vec::with_capacity(len.min(64 * 1024));
+        let got = (&mut *stream).take(len as u64).read_to_end(&mut buf).await?;
+        if got != len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "frame ended before its claimed size",
+            ));
+        }
         Ok(buf)
     }
 
@@ -232,22 +287,36 @@ impl P2PNode {
 
     pub async fn catch_up(engine: Arc<Mutex<ConsensusEngine>>, db: Arc<DB>, peers: Vec<String>) {
         for peer in &peers {
-            let our_height = engine.lock().await.state.chain_height;
-            if let Some(peer_height) = Self::request_height(peer).await {
-                if peer_height > our_height {
-                    println!(
-                        "[CATCH-UP] Peer {} is ahead (height {} vs our {}). Requesting blocks {}..={}...",
-                        peer, peer_height, our_height, our_height + 1, peer_height
-                    );
-                    if let Some(blocks) = Self::request_blocks(peer, our_height + 1).await {
-                        println!("[CATCH-UP] Received {} block(s) from {}.", blocks.len(), peer);
-                        for b in blocks {
-                            if !Self::apply_verified_block(b, engine.clone(), db.clone()).await {
-                                println!("[CATCH-UP] Stopped applying blocks from {} after a rejection.", peer);
-                                break;
-                            }
-                        }
+            // Blocks arrive in batches; keep asking until we are level with this peer
+            // or a round makes no progress.
+            for _ in 0..10_000 {
+                let our_height = engine.lock().await.state.chain_height;
+                let peer_height = match Self::request_height(peer).await {
+                    Some(h) => h,
+                    None => break,
+                };
+                if peer_height <= our_height {
+                    break;
+                }
+                println!(
+                    "[CATCH-UP] Peer {} is ahead (height {} vs our {}). Requesting blocks from {}...",
+                    peer, peer_height, our_height, our_height + 1
+                );
+                let blocks = match Self::request_blocks(peer, our_height + 1).await {
+                    Some(b) if !b.is_empty() => b,
+                    _ => break,
+                };
+                println!("[CATCH-UP] Received {} block(s) from {}.", blocks.len(), peer);
+                let mut all_applied = true;
+                for b in blocks {
+                    if !Self::apply_verified_block(b, engine.clone(), db.clone()).await {
+                        println!("[CATCH-UP] Stopped applying blocks from {} after a rejection.", peer);
+                        all_applied = false;
+                        break;
                     }
+                }
+                if !all_applied {
+                    break;
                 }
             }
         }
@@ -373,6 +442,7 @@ impl P2PNode {
         let address = format!("0.0.0.0:{}", self.p2p_port);
         let listener = TcpListener::bind(&address).await?;
         println!("[NETWORK] P2P Core Engine bound live to interface: {}", address);
+        let ip_counts: IpCounts = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         tokio::spawn(async move {
             loop {
@@ -382,7 +452,12 @@ impl P2PNode {
                     let peers_clone = peers.clone();
                     let peer_activity_clone = peer_activity.clone();
                     let peer_ip = remote_addr.ip().to_string();
+                    let ip_guard = match try_ip_guard(&ip_counts, &peer_ip, MAX_P2P_CONNS_PER_IP) {
+                        Some(g) => g,
+                        None => continue, // too many open connections from this address
+                    };
                     tokio::spawn(async move {
+                        let _ip_guard = ip_guard;
                         let read_result = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             Self::read_framed(&mut socket),
@@ -410,8 +485,15 @@ impl P2PNode {
                                     P2PMessage::RequestBlocks(from_height) => {
                                         let our_height = engine_clone.lock().await.state.chain_height;
                                         let mut blocks = Vec::new();
-                                        for h in from_height..=our_height {
+                                        // Bounded reply: a batch of blocks, never the whole chain.
+                                        let last = our_height.min(from_height.saturating_add(MAX_BLOCKS_PER_RESPONSE - 1));
+                                        let mut total_bytes = 0usize;
+                                        for h in from_height..=last {
                                             if let Ok(Some(bytes)) = db_clone.get(format!("block_{}", h).as_bytes()) {
+                                                total_bytes += bytes.len();
+                                                if !blocks.is_empty() && total_bytes > MAX_RESPONSE_BYTES {
+                                                    break;
+                                                }
                                                 if let Ok(block) = deserialize::<Block>(&bytes) {
                                                     blocks.push(block);
                                                 }
@@ -1249,5 +1331,36 @@ impl P2PNode {
             }
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn ip_slots_are_limited_and_released() {
+        let map: IpCounts = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut held = Vec::new();
+        for _ in 0..MAX_P2P_CONNS_PER_IP {
+            held.push(try_ip_guard(&map, "1.2.3.4", MAX_P2P_CONNS_PER_IP).expect("slot"));
+        }
+        assert!(try_ip_guard(&map, "1.2.3.4", MAX_P2P_CONNS_PER_IP).is_none());
+        // another address is unaffected
+        assert!(try_ip_guard(&map, "5.6.7.8", MAX_P2P_CONNS_PER_IP).is_some());
+        held.pop(); // releases one slot
+        assert!(try_ip_guard(&map, "1.2.3.4", MAX_P2P_CONNS_PER_IP).is_some());
+        drop(held);
+        assert!(map.lock().unwrap().get("1.2.3.4").is_none() || map.lock().unwrap().get("1.2.3.4") == Some(&1));
+    }
+
+    #[test]
+    fn block_request_range_is_bounded() {
+        let our_height: u64 = 35_000;
+        for from in [0u64, 1, 34_990, 35_000, 35_001, u64::MAX] {
+            let last = our_height.min(from.saturating_add(MAX_BLOCKS_PER_RESPONSE - 1));
+            let count = if from > last { 0 } else { last - from + 1 };
+            assert!(count <= MAX_BLOCKS_PER_RESPONSE);
+        }
     }
 }
