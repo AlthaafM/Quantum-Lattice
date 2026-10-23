@@ -191,25 +191,6 @@ async fn main() {
         p2p_port, rpc_port, admin_port
     );
 
-    // ---- Test transaction ----
-    // Still queues a real signed transfer so there's something for an
-    // external miner to include — but nothing gets mined automatically
-    // anymore. A block only gets produced when a miner actually submits
-    // valid proof-of-work via /api/mining/submit (see network.rs and
-    // src/bin/miner.rs).
-    if node_mode != "node2" {
-        let test_amount: u64 = 1 * consensus::COIN;
-        let mut message = Vec::new();
-        message.extend_from_slice(&vault_a_bytes);
-        message.extend_from_slice(&vault_b_bytes);
-        message.extend_from_slice(&test_amount.to_le_bytes());
-        let signature = wallet::sign_with_seed_bytes(&vault_a_seed, &message);
-
-        let test_tx = Transaction::new(vault_a_bytes.clone(), vault_b_bytes.clone(), test_amount, signature);
-        mempool.lock().await.push(test_tx);
-        println!("[TEST] Queued a signed 1 QL transfer (Vault A -> Vault B) into the mempool.");
-    }
-
     println!("[MINING] Waiting for a miner to submit proof-of-work — run: cargo run --bin miner -- 127.0.0.1:{}", rpc_port);
 
     // Everything from here runs in spawned background tasks (P2P, RPC,
