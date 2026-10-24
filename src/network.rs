@@ -122,6 +122,34 @@ const MAX_MEMPOOL_TXS: usize = 2000;
 /// Transaction submissions allowed per minute from one outside address.
 const MAX_TX_SUBMITS_PER_MIN: u32 = 60;
 
+fn json_error(status: &str, msg: &str) -> String {
+    format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"error\":\"{}\"}}\r\n",
+        status, msg
+    )
+}
+
+/// Rebuilds every account's transaction counter from the blocks at or after the
+/// Fork 3 activation height. Called once at startup (the counters are not stored).
+pub fn rebuild_nonces(db: &DB, engine: &mut ConsensusEngine) {
+    engine.nonces.clear();
+    let first = crate::consensus::FORK3_ACTIVATION_HEIGHT;
+    let tip = engine.state.chain_height;
+    if tip < first {
+        return;
+    }
+    for h in first..=tip {
+        if let Ok(Some(bytes)) = db.get(format!("block_{}", h).as_bytes()) {
+            if let Ok(block) = deserialize::<Block>(&bytes) {
+                for tx in &block.transactions {
+                    *engine.nonces.entry(tx.sender.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    println!("[FORK3] Rebuilt transaction counters for {} account(s) from blocks {}..={}.", engine.nonces.len(), first, tip);
+}
+
 /// The address a request really came from. Requests arriving through our own
 /// Cloudflare tunnel connect from loopback and carry the visitor's address in the
 /// CF-Connecting-IP header; that header is trusted ONLY when the TCP peer is loopback,
@@ -412,11 +440,9 @@ impl P2PNode {
             }
         }
 
-        for tx in &block.transactions {
-            if let Err(e) = eng.apply_transaction(&tx.sender, &tx.receiver, tx.amount, &tx.signature) {
-                println!("[REJECTED] Block {} contains an invalid transaction: {:?}", block.header.block_height, e);
-                return false;
-            }
+        if let Err(e) = eng.apply_block_txs(block.header.block_height, &block.transactions) {
+            println!("[REJECTED] Block {} contains an invalid transaction: {:?}", block.header.block_height, e);
+            return false;
         }
 
         eng.process_block_reward(block.header.miner.clone());
@@ -754,9 +780,12 @@ impl P2PNode {
                                     // rather than actually rounding or being imprecise —
                                     // the fractional amount was being lost outright.
                                     format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"address\":\"{}\",\"balance_ql\":{:.8}}}\r\n",
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"address\":\"{}\",\"balance_ql\":{:.8},\"nonce\":{},\"chain_height\":{},\"fork3_height\":{}}}\r\n",
                                         address_hex,
-                                        balance as f64 / COIN as f64
+                                        balance as f64 / COIN as f64,
+                                        eng.next_nonce(&pk_bytes),
+                                        eng.state.chain_height,
+                                        crate::consensus::FORK3_ACTIVATION_HEIGHT
                                     )
                                 }
                                 Err(_) => "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nInvalid hex address\r\n".to_string(),
@@ -783,6 +812,18 @@ impl P2PNode {
                                     loop {
                                         if let Ok(Some(bytes)) = db_clone.get(format!("block_{}", h).as_bytes()) {
                                             if let Ok(block) = deserialize::<Block>(&bytes) {
+                                                // Block rewards are credited through the header, not as a
+                                                // transaction, so list blocks this address mined as well.
+                                                if block.header.miner == address_bytes && block.header.block_height > 0 {
+                                                    let halvings = block.header.block_height / crate::consensus::HALVING_INTERVAL;
+                                                    let reward = if halvings >= 64 { 0 } else { crate::consensus::INITIAL_REWARD >> halvings };
+                                                    items.push(format!(
+                                                        "{{\"direction\":\"mined\",\"counterparty\":\"block reward\",\"amount_ql\":{:.8},\"block_height\":{},\"timestamp\":{}}}",
+                                                        reward as f64 / COIN as f64,
+                                                        block.header.block_height,
+                                                        block.header.timestamp
+                                                    ));
+                                                }
                                                 for tx in block.transactions.iter() {
                                                     let is_sender = tx.sender == address_bytes;
                                                     let is_receiver = tx.receiver == address_bytes;
@@ -826,28 +867,65 @@ impl P2PNode {
                                         (Ok(sender), Ok(receiver), Ok(signature)) => {
                                             let rate_ok = is_loopback_str(&client_ip)
                                                 || rate_limiter_clone.check(&format!("tx-ip:{}", client_ip), MAX_TX_SUBMITS_PER_MIN, 60).await;
-                                            let mut message = Vec::with_capacity(sender.len() + receiver.len() + 8);
-                                            message.extend_from_slice(&sender);
-                                            message.extend_from_slice(&receiver);
-                                            message.extend_from_slice(&amt.to_le_bytes());
+                                            let nonce_opt = extract_json_number(body, "nonce");
+                                            let (next_height, expected_nonce, sender_balance) = {
+                                                let eng = engine_clone.lock().await;
+                                                (eng.state.chain_height + 1, eng.next_nonce(&sender), eng.balance_of(&sender))
+                                            };
                                             if !rate_ok {
-                                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Too many transactions submitted - slow down.\"}\r\n".to_string()
-                                            } else if amt == 0 || !crate::wallet::verify_signature(&sender, &message, &signature) {
-                                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Invalid signature or amount\"}\r\n".to_string()
-                                            } else if engine_clone.lock().await.balance_of(&sender) < amt {
-                                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Insufficient balance\"}\r\n".to_string()
-                                            } else {
-                                                let mut pool = mempool_clone.lock().await;
-                                                let already = pool.iter().any(|t| {
-                                                    t.sender == sender && t.receiver == receiver && t.amount == amt && t.signature == signature
-                                                });
-                                                if !already && pool.len() >= MAX_MEMPOOL_TXS {
-                                                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"Transaction queue is full - try again shortly.\"}\r\n".to_string()
-                                                } else {
-                                                    if !already {
-                                                        pool.push(Transaction::new(sender, receiver, amt, signature));
+                                                json_error("429 Too Many Requests", "Too many transactions submitted - slow down.")
+                                            } else if crate::consensus::fork3_active(next_height) {
+                                                // ---- Fork 3 rules: signed message covers chain ID and the account's transaction number ----
+                                                match nonce_opt {
+                                                    None => json_error("400 Bad Request", "Fork 3 is active: transactions must include a nonce. Please update your wallet."),
+                                                    Some(nonce) => {
+                                                        if amt == 0 || sender.len() != crate::consensus::ADDRESS_LEN || receiver.len() != crate::consensus::ADDRESS_LEN {
+                                                            json_error("400 Bad Request", "Invalid address or amount")
+                                                        } else if nonce < expected_nonce {
+                                                            json_error("400 Bad Request", "Nonce already used")
+                                                        } else if nonce > expected_nonce + crate::consensus::MAX_PENDING_NONCE_AHEAD {
+                                                            json_error("400 Bad Request", "Nonce too far ahead")
+                                                        } else if !crate::wallet::verify_signature(&sender, &crate::consensus::tx_message_v2(&sender, &receiver, amt, nonce), &signature) {
+                                                            json_error("400 Bad Request", "Invalid signature")
+                                                        } else if sender_balance < amt {
+                                                            json_error("400 Bad Request", "Insufficient balance")
+                                                        } else {
+                                                            let mut pool = mempool_clone.lock().await;
+                                                            let nonce_i = nonce as i64;
+                                                            if pool.iter().any(|t| t.sender == sender && t.timestamp == nonce_i) {
+                                                                json_error("400 Bad Request", "A transaction with this nonce is already queued")
+                                                            } else if pool.len() >= MAX_MEMPOOL_TXS {
+                                                                json_error("503 Service Unavailable", "Transaction queue is full - try again shortly.")
+                                                            } else {
+                                                                pool.push(Transaction { sender, receiver, amount: amt, signature, timestamp: nonce_i });
+                                                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"status\":\"queued\",\"note\":\"included when a miner produces the next block\"}\r\n".to_string()
+                                                            }
+                                                        }
                                                     }
-                                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"status\":\"queued\",\"note\":\"included when a miner produces the next block\"}\r\n".to_string()
+                                                }
+                                            } else {
+                                                // ---- original rules, valid until Fork 3 activates ----
+                                                let mut message = Vec::with_capacity(sender.len() + receiver.len() + 8);
+                                                message.extend_from_slice(&sender);
+                                                message.extend_from_slice(&receiver);
+                                                message.extend_from_slice(&amt.to_le_bytes());
+                                                if amt == 0 || !crate::wallet::verify_signature(&sender, &message, &signature) {
+                                                    json_error("400 Bad Request", "Invalid signature or amount")
+                                                } else if sender_balance < amt {
+                                                    json_error("400 Bad Request", "Insufficient balance")
+                                                } else {
+                                                    let mut pool = mempool_clone.lock().await;
+                                                    let already = pool.iter().any(|t| {
+                                                        t.sender == sender && t.receiver == receiver && t.amount == amt && t.signature == signature
+                                                    });
+                                                    if !already && pool.len() >= MAX_MEMPOOL_TXS {
+                                                        json_error("503 Service Unavailable", "Transaction queue is full - try again shortly.")
+                                                    } else {
+                                                        if !already {
+                                                            pool.push(Transaction::new(sender, receiver, amt, signature));
+                                                        }
+                                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"status\":\"queued\",\"note\":\"included when a miner produces the next block\"}\r\n".to_string()
+                                                    }
                                                 }
                                             }
                                         }
@@ -1075,12 +1153,21 @@ impl P2PNode {
                                             } else {
                                                 let mut pending = mempool_clone.lock().await;
                                                 let mut accepted = Vec::new();
-                                                for tx in pending.drain(..) {
-                                                    match eng.apply_transaction(&tx.sender, &tx.receiver, tx.amount, &tx.signature) {
+                                                let mut queue: Vec<Transaction> = pending.drain(..).collect();
+                                                if crate::consensus::fork3_active(next_height) {
+                                                    // each account's transactions must go in number order
+                                                    queue.sort_by(|a, b| a.sender.cmp(&b.sender).then(a.timestamp.cmp(&b.timestamp)));
+                                                }
+                                                let mut keep: Vec<Transaction> = Vec::new();
+                                                for tx in queue {
+                                                    match eng.apply_tx(next_height, &tx) {
                                                         Ok(()) => accepted.push(tx),
+                                                        // a later number whose earlier one has not arrived yet: keep it queued
+                                                        Err(crate::consensus::TxError::NonceTooHigh) => keep.push(tx),
                                                         Err(e) => println!("[REJECTED TX at mine time] {:?}", e),
                                                     }
                                                 }
+                                                *pending = keep;
                                                 drop(pending);
 
                                                 eng.process_block_reward(miner_bytes.clone());
@@ -1355,13 +1442,25 @@ impl P2PNode {
                                             match hex::decode(&to_hex) {
                                                 Ok(receiver) => {
                                                     let amount_smallest = (amount_ql as f64 * COIN as f64).round() as u64;
-                                                    let mut message = Vec::with_capacity(sender_pk.len() + receiver.len() + 8);
-                                                    message.extend_from_slice(sender_pk);
-                                                    message.extend_from_slice(&receiver);
-                                                    message.extend_from_slice(&amount_smallest.to_le_bytes());
-
-                                                    let signature = sign_with_seed_bytes(seed_bytes, &message);
-                                                    let tx = Transaction::new(sender_pk.to_vec(), receiver, amount_smallest, signature);
+                                                    let (next_height, nonce) = {
+                                                        let eng = engine_clone.lock().await;
+                                                        (eng.state.chain_height + 1, eng.next_nonce(sender_pk))
+                                                    };
+                                                    let tx = if crate::consensus::fork3_active(next_height) {
+                                                        // count transactions of this vault already waiting in the queue
+                                                        let queued = mempool_clone.lock().await.iter().filter(|t| t.sender == sender_pk).count() as u64;
+                                                        let n = nonce + queued;
+                                                        let message = crate::consensus::tx_message_v2(sender_pk, &receiver, amount_smallest, n);
+                                                        let signature = sign_with_seed_bytes(seed_bytes, &message);
+                                                        Transaction { sender: sender_pk.to_vec(), receiver, amount: amount_smallest, signature, timestamp: n as i64 }
+                                                    } else {
+                                                        let mut message = Vec::with_capacity(sender_pk.len() + receiver.len() + 8);
+                                                        message.extend_from_slice(sender_pk);
+                                                        message.extend_from_slice(&receiver);
+                                                        message.extend_from_slice(&amount_smallest.to_le_bytes());
+                                                        let signature = sign_with_seed_bytes(seed_bytes, &message);
+                                                        Transaction::new(sender_pk.to_vec(), receiver, amount_smallest, signature)
+                                                    };
                                                     mempool_clone.lock().await.push(tx);
 
                                                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"status\":\"queued\",\"note\":\"included when a miner produces the next block\"}\r\n".to_string()
