@@ -1319,7 +1319,27 @@ $('btn-send').addEventListener('click', async () => {
     const amountSmallest = Math.round(amountQL * 100000000);
 
     const amountBytes = u64ToLEBytes(BigInt(amountSmallest));
-    const message = concatBytes(publicKeyBytes, receiverBytes, amountBytes);
+
+    // Ask the node which transaction format is in force. From the Fork 3 block
+    // onward a payment is signed over the chain ID and this account's
+    // transaction number; before that the original format is used.
+    const ctxRes = await fetch(apiBase() + '/api/balance?address=' + hexEncode(publicKeyBytes));
+    const ctx = await ctxRes.json();
+    const fork3 = ctx.fork3_height !== undefined && ctx.fork3_height !== null &&
+                  (Number(ctx.chain_height) + 1) >= Number(ctx.fork3_height);
+    const nonce = Number(ctx.nonce || 0);
+
+    let message;
+    if (fork3) {
+      message = concatBytes(
+        new TextEncoder().encode('QLTX2'),
+        new Uint8Array([0x01, 0x00, 0x4C, 0x51]),   // chain ID 0x514C0001, little-endian
+        publicKeyBytes, receiverBytes, amountBytes,
+        u64ToLEBytes(BigInt(nonce))
+      );
+    } else {
+      message = concatBytes(publicKeyBytes, receiverBytes, amountBytes);
+    }
 
     let signature;
     try {
@@ -1330,7 +1350,7 @@ $('btn-send').addEventListener('click', async () => {
 
     status.textContent = 'Broadcasting to node…';
 
-    const body = '{"sender":"' + hexEncode(publicKeyBytes) + '","receiver":"' + hexEncode(receiverBytes) + '","amount":' + amountSmallest + ',"signature":"' + hexEncode(new Uint8Array(signature)) + '"}';
+    const body = '{"sender":"' + hexEncode(publicKeyBytes) + '","receiver":"' + hexEncode(receiverBytes) + '","amount":' + amountSmallest + (fork3 ? ',"nonce":' + nonce : '') + ',"signature":"' + hexEncode(new Uint8Array(signature)) + '"}';
 
     const res = await fetch(apiBase() + '/api/submit_tx', {
       method: 'POST',
@@ -1349,7 +1369,8 @@ $('btn-send').addEventListener('click', async () => {
       $('send-to').value = '';
       $('send-amount').value = '';
     } else {
-      throw new Error(resJson.error || resJson.note || 'Node rejected the transaction.');
+      const msg = resJson.error || resJson.note || 'Node rejected the transaction.';
+      throw new Error(/already queued/i.test(msg) ? 'Your previous payment is still waiting for the next block. Wait for it to confirm, then send again.' : msg);
     }
   } catch (e) {
     status.className = 'send-status fail';
@@ -1393,9 +1414,10 @@ async function loadRealHistory() {
       const el = document.createElement('div');
       el.className = 'activity-item';
       const sign = tx.direction === 'sent' ? '-' : '+';
-      const label = tx.direction === 'sent' ? 'Sent to ' : 'Received from ';
+      const label = tx.direction === 'sent' ? 'Sent to ' : (tx.direction === 'mined' ? 'Mined block #' + tx.block_height : 'Received from ');
       const color = tx.direction === 'sent' ? '' : 'color:var(--success);';
-      el.innerHTML = '<span class="label">' + label + tx.counterparty.slice(0, 14) + '…</span><span class="val" style="' + color + '">' + sign + tx.amount_ql + ' QL</span>';
+      const who = tx.direction === 'mined' ? '' : tx.counterparty.slice(0, 14) + '…';
+      el.innerHTML = '<span class="label">' + label + who + '</span><span class="val" style="' + color + '">' + sign + tx.amount_ql + ' QL</span>';
       return el;
     }
 
