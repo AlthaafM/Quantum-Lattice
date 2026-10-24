@@ -68,6 +68,15 @@ fn http_post(host_port: &str, path: &str, body: &str) -> Option<String> {
     Some(response)
 }
 
+fn http_get(host_port: &str, path: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(host_port).ok()?;
+    let request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host_port);
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    Some(response)
+}
+
 fn u64_to_le_bytes(v: u64) -> [u8; 8] {
     v.to_le_bytes()
 }
@@ -122,19 +131,45 @@ fn main() {
 
     // Message format must match exactly what the node expects:
     // sender_bytes || receiver_bytes || amount_le_bytes(8)
-    let mut message = Vec::with_capacity(sender_pk.len() + receiver_bytes.len() + 8);
+    // From the Fork 3 block onward the message also carries the chain ID and the
+    // account's transaction number (read from the node).
+    let ctx_body = http_get(node_address, &format!("/api/balance?address={}", hex::encode(&sender_pk)))
+        .map(|r| r.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+        .unwrap_or_default();
+    let ctx_num = |key: &str| -> Option<u64> {
+        let pat = format!("\"{}\":", key);
+        let at = ctx_body.find(&pat)? + pat.len();
+        let digits: String = ctx_body[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    let nonce = ctx_num("nonce").unwrap_or(0);
+    let fork3 = match (ctx_num("chain_height"), ctx_num("fork3_height")) {
+        (Some(h), Some(f)) => h + 1 >= f,
+        _ => false,
+    };
+
+    let mut message = Vec::with_capacity(sender_pk.len() + receiver_bytes.len() + 24);
+    if fork3 {
+        message.extend_from_slice(b"QLTX2");
+        message.extend_from_slice(&0x514C_0001u32.to_le_bytes());
+    }
     message.extend_from_slice(&sender_pk);
     message.extend_from_slice(&receiver_bytes);
     message.extend_from_slice(&u64_to_le_bytes(amount_smallest));
+    if fork3 {
+        message.extend_from_slice(&u64_to_le_bytes(nonce));
+    }
 
     let signature = sk.sign(&message);
     let signature_bytes = signature.to_bytes();
 
+    let nonce_field = if fork3 { format!(",\"nonce\":{}", nonce) } else { String::new() };
     let body = format!(
-        "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{},\"signature\":\"{}\"}}",
+        "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{}{},\"signature\":\"{}\"}}",
         hex::encode(&sender_pk),
         hex::encode(&receiver_bytes),
         amount_smallest,
+        nonce_field,
         hex::encode(signature_bytes.as_slice())
     );
 
