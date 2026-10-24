@@ -1251,6 +1251,7 @@ function enterDashboard() {
   }
 
   refreshChainData();
+  loadRealHistory();
   pollTimer = setInterval(refreshChainData, 6000);
 }
 
@@ -1318,7 +1319,27 @@ $('btn-send').addEventListener('click', async () => {
     const amountSmallest = Math.round(amountQL * 100000000);
 
     const amountBytes = u64ToLEBytes(BigInt(amountSmallest));
-    const message = concatBytes(publicKeyBytes, receiverBytes, amountBytes);
+
+    // Ask the node which transaction format is in force. From the Fork 3 block
+    // onward a payment is signed over the chain ID and this account's
+    // transaction number; before that the original format is used.
+    const ctxRes = await fetch(apiBase() + '/api/balance?address=' + hexEncode(publicKeyBytes));
+    const ctx = await ctxRes.json();
+    const fork3 = ctx.fork3_height !== undefined && ctx.fork3_height !== null &&
+                  (Number(ctx.chain_height) + 1) >= Number(ctx.fork3_height);
+    const nonce = Number(ctx.nonce || 0);
+
+    let message;
+    if (fork3) {
+      message = concatBytes(
+        new TextEncoder().encode('QLTX2'),
+        new Uint8Array([0x01, 0x00, 0x4C, 0x51]),   // chain ID 0x514C0001, little-endian
+        publicKeyBytes, receiverBytes, amountBytes,
+        u64ToLEBytes(BigInt(nonce))
+      );
+    } else {
+      message = concatBytes(publicKeyBytes, receiverBytes, amountBytes);
+    }
 
     let signature;
     try {
@@ -1329,7 +1350,7 @@ $('btn-send').addEventListener('click', async () => {
 
     status.textContent = 'Broadcasting to node…';
 
-    const body = '{"sender":"' + hexEncode(publicKeyBytes) + '","receiver":"' + hexEncode(receiverBytes) + '","amount":' + amountSmallest + ',"signature":"' + hexEncode(new Uint8Array(signature)) + '"}';
+    const body = '{"sender":"' + hexEncode(publicKeyBytes) + '","receiver":"' + hexEncode(receiverBytes) + '","amount":' + amountSmallest + (fork3 ? ',"nonce":' + nonce : '') + ',"signature":"' + hexEncode(new Uint8Array(signature)) + '"}';
 
     const res = await fetch(apiBase() + '/api/submit_tx', {
       method: 'POST',
@@ -1348,7 +1369,8 @@ $('btn-send').addEventListener('click', async () => {
       $('send-to').value = '';
       $('send-amount').value = '';
     } else {
-      throw new Error(resJson.error || resJson.note || 'Node rejected the transaction.');
+      const msg = resJson.error || resJson.note || 'Node rejected the transaction.';
+      throw new Error(/already queued/i.test(msg) ? 'Your previous payment is still waiting for the next block. Wait for it to confirm, then send again.' : msg);
     }
   } catch (e) {
     status.className = 'send-status fail';
@@ -1375,6 +1397,47 @@ function addActivity(amount, to) {
   preview.prepend(row());
   while (preview.children.length > 2) {
     preview.removeChild(preview.lastChild);
+  }
+}
+
+// Real, complete transaction history — both sent AND received, straight
+// from the node itself, rather than only what this session personally
+// triggered. Fetched once on unlock (a full-chain scan on the node's
+// side, so not worth repeating on every 6-second poll).
+async function loadRealHistory() {
+  try {
+    const res = await fetch(apiBase() + '/api/transactions?address=' + currentAddress);
+    const data = await res.json();
+    const txs = (data.transactions || []).slice().sort((a, b) => b.block_height - a.block_height);
+
+    function row(tx) {
+      const el = document.createElement('div');
+      el.className = 'activity-item';
+      const sign = tx.direction === 'sent' ? '-' : '+';
+      const label = tx.direction === 'sent' ? 'Sent to ' : (tx.direction === 'mined' ? 'Mined block #' + tx.block_height : 'Received from ');
+      const color = tx.direction === 'sent' ? '' : 'color:var(--success);';
+      const who = tx.direction === 'mined' ? '' : tx.counterparty.slice(0, 14) + '…';
+      el.innerHTML = '<span class="label">' + label + who + '</span><span class="val" style="' + color + '">' + sign + tx.amount_ql + ' QL</span>';
+      return el;
+    }
+
+    const list = $('activity-list');
+    const preview = $('home-activity-preview');
+
+    if (txs.length === 0) {
+      list.innerHTML = '<div class="empty-note">No transactions yet.</div>';
+      preview.innerHTML = '<div class="empty-note">No transactions yet.</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    txs.forEach(tx => list.appendChild(row(tx)));
+
+    preview.innerHTML = '';
+    txs.slice(0, 2).forEach(tx => preview.appendChild(row(tx)));
+  } catch (e) {
+    // Leave whatever was already showing (e.g. session-only sends) if the
+    // real history genuinely can't be reached right now.
   }
 }
 
