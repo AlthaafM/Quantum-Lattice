@@ -464,10 +464,22 @@ function App() {
         const amountSmallest = Math.round(amountQL * 100000000);
         const keys = ml_dsa65.keygen(secretSeed);
         const amountBytes = u64ToLEBytes(BigInt(amountSmallest));
-        const message = concatBytes(keys.publicKey, receiverBytes, amountBytes);
+        // Ask the node which transaction format is in force (Fork 3: chain ID + transaction number).
+        const ctxRes = await fetch(NODE_URL + '/api/balance?address=' + bytesToHex(keys.publicKey));
+        const ctx = await ctxRes.json();
+        const fork3 = ctx.fork3_height !== undefined && ctx.fork3_height !== null &&
+          (Number(ctx.chain_height) + 1) >= Number(ctx.fork3_height);
+        const nonce = Number(ctx.nonce || 0);
+        const message = fork3
+          ? concatBytes(
+              new Uint8Array([0x51, 0x4c, 0x54, 0x58, 0x32]),   // "QLTX2"
+              new Uint8Array([0x01, 0x00, 0x4c, 0x51]),         // chain ID 0x514C0001, little-endian
+              keys.publicKey, receiverBytes, amountBytes,
+              u64ToLEBytes(BigInt(nonce)))
+          : concatBytes(keys.publicKey, receiverBytes, amountBytes);
         const signature = ml_dsa65.sign(message, keys.secretKey);
         setSendStatus('Broadcasting to node...');
-        const body = JSON.stringify({ sender: bytesToHex(keys.publicKey), receiver: bytesToHex(receiverBytes), amount: amountSmallest, signature: bytesToHex(signature) });
+        const body = JSON.stringify({ sender: bytesToHex(keys.publicKey), receiver: bytesToHex(receiverBytes), amount: amountSmallest, ...(fork3 ? { nonce } : {}), signature: bytesToHex(signature) });
         const res = await fetch(NODE_URL + '/api/submit_tx', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
         const rawText = await res.text();
         let resJson: any = {};
@@ -482,7 +494,8 @@ function App() {
           setSendAmount('');
           setTimeout(() => { setScreen('dashboard'); setSendStatus(''); fetchDashboardData(address); }, 2000);
         } else {
-          setSendStatus('✕ Failed: ' + (resJson.error || resJson.note || 'Unknown error'));
+          const failMsg = resJson.error || resJson.note || 'Unknown error';
+          setSendStatus('✕ Failed: ' + (/already queued/i.test(failMsg) ? 'your previous payment is still waiting for the next block - wait for it to confirm, then send again.' : failMsg));
         }
       } catch (e: any) {
         setSendStatus('✕ Error: ' + (e.message || String(e)));
@@ -673,10 +686,10 @@ function App() {
           {realHistory.length > 0 ? (
             realHistory.map((tx, i) => (
               <View key={i} style={[styles.resultBox, styles.activityRow, { marginTop: i === 0 ? 0 : 12, borderTopWidth: 0 }]}>
-                <Text style={[styles.activityAmount, tx.direction === 'received' ? { color: '#34d399' } : null]}>
+                <Text style={[styles.activityAmount, tx.direction !== 'sent' ? { color: '#34d399' } : null]}>
                   {tx.direction === 'sent' ? '-' : '+'}{tx.amount_ql} QL
                 </Text>
-                <Text style={styles.activityTo}>{tx.direction === 'sent' ? 'to ' : 'from '}{tx.counterparty}</Text>
+                <Text style={styles.activityTo}>{tx.direction === 'sent' ? 'to ' : (tx.direction === 'mined' ? '' : 'from ')}{tx.direction === 'mined' ? 'mining reward' : tx.counterparty}</Text>
                 <Text style={styles.activityTime}>Block #{tx.block_height}</Text>
               </View>
             ))
@@ -874,11 +887,11 @@ function App() {
           {realHistory.length > 0 ? (
             realHistory.slice(0, 3).map((tx, i) => (
               <View key={i} style={styles.activityRow}>
-                <Text style={[styles.activityAmount, tx.direction === 'received' ? { color: '#34d399' } : null]}>
+                <Text style={[styles.activityAmount, tx.direction !== 'sent' ? { color: '#34d399' } : null]}>
                   {tx.direction === 'sent' ? '-' : '+'}{tx.amount_ql} QL
                 </Text>
                 <Text style={styles.activityTo} numberOfLines={1}>
-                  {tx.direction === 'sent' ? 'to ' : 'from '}{tx.counterparty.slice(0, 16)}...
+                  {tx.direction === 'mined' ? 'mining reward' : (tx.direction === 'sent' ? 'to ' : 'from ') + tx.counterparty.slice(0, 16) + '...'}
                 </Text>
               </View>
             ))
@@ -972,7 +985,6 @@ const styles = StyleSheet.create({
 });
 
 export default App;
-
 
 
 
