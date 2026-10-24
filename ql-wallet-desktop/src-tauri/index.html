@@ -681,7 +681,7 @@
 </div>
 
 <script type="module">
-import init, { generate_keypair, sign_message, validate_public_key, keypair_from_seed } from './pkg/ql_wallet_wasm.js';
+import init, { generate_keypair as wasm_generate_keypair, sign_message as wasm_sign_message, validate_public_key as wasm_validate_public_key, keypair_from_seed as wasm_keypair_from_seed } from './pkg/ql_wallet_wasm.js';
 import { entropyToMnemonic, mnemonicToEntropy, validateMnemonic } from 'https://cdn.jsdelivr.net/npm/web-bip39/+esm';
 import bip39Wordlist from 'https://cdn.jsdelivr.net/npm/web-bip39/wordlists/english/+esm';
 
@@ -689,8 +689,63 @@ let wasmReady = init();
 
 document.getElementById('node-url').value = 'quantum-lattice.futuristicai.co.za';
 
-function isValidAddress(bytes) {
-  return bytes && bytes.length > 0 && validate_public_key(bytes);
+// ---- Native/WASM bridge ----
+// When running inside the desktop or mobile app (Tauri), real
+// cryptographic work runs as genuine native code, completely bypassing
+// the WebView — this avoids depending on whatever WebView engine happens
+// to be on a given device. In a plain browser tab, there's no native
+// layer to call into at all, so WASM remains the only option there.
+// Everything else in this file calls these four functions exactly as
+// before; only what happens inside them differs by environment.
+//
+// Checks '_TAURI_INTERNALS' rather than 'window.TAURI_' — this is
+// Tauri's own recommended, always-present marker (window._TAURI_ only
+// exists when withGlobalTauri is enabled, and confirmed real-world
+// reports show it can still be genuinely absent at the exact moment a
+// page's own top-level code runs on Android, even though it reliably
+// exists moments later). Checked fresh each time, never cached, to avoid
+// any load-time race entirely.
+function isTauriEnv() {
+  return '_TAURI_INTERNALS_' in window;
+}
+
+async function generate_keypair() {
+  if (isTauriEnv()) {
+    const result = await window._TAURI_INTERNALS_.invoke('native_generate_keypair');
+    return { public_key: new Uint8Array(result.public_key), secret_key: new Uint8Array(result.secret_key) };
+  }
+  await wasmReady;
+  return wasm_generate_keypair();
+}
+
+async function keypair_from_seed(seedBytes) {
+  if (isTauriEnv()) {
+    const result = await window._TAURI_INTERNALS_.invoke('native_keypair_from_seed', { seedBytes: Array.from(seedBytes) });
+    return { public_key: new Uint8Array(result.public_key), secret_key: new Uint8Array(result.secret_key) };
+  }
+  await wasmReady;
+  return wasm_keypair_from_seed(seedBytes);
+}
+
+async function sign_message(secretKeyBytes, message) {
+  if (isTauriEnv()) {
+    const result = await window._TAURI_INTERNALS_.invoke('native_sign_message', { seedBytes: Array.from(secretKeyBytes), message: Array.from(message) });
+    return new Uint8Array(result);
+  }
+  await wasmReady;
+  return wasm_sign_message(secretKeyBytes, message);
+}
+
+async function validate_public_key(bytes) {
+  if (isTauriEnv()) {
+    return await window._TAURI_INTERNALS_.invoke('native_validate_public_key', { publicKeyBytes: Array.from(bytes) });
+  }
+  await wasmReady;
+  return wasm_validate_public_key(bytes);
+}
+
+async function isValidAddress(bytes) {
+  return bytes && bytes.length > 0 && await validate_public_key(bytes);
 }
 
 let secretKeyBytes = null;
@@ -784,7 +839,6 @@ document.querySelectorAll('.stage > .card > .tabs > .tab').forEach(tab => {
     $('tab-account').classList.toggle('hidden', which !== 'account');
   });
 });
-
 document.querySelectorAll('[data-account-tab]').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('[data-account-tab]').forEach(t => t.classList.remove('active'));
@@ -909,7 +963,7 @@ $('btn-generate').addEventListener('click', async () => {
   let kp;
   try {
     await wasmReady;
-    kp = generate_keypair();
+    kp = await generate_keypair();
   } catch (e) {
     err.textContent = 'Could not generate keys in this browser: ' + (e.message || e);
     err.style.display = 'block';
@@ -978,15 +1032,35 @@ function updateContinueButton() {
   $('btn-continue-dash').disabled = !(keystoreOk && seedOk);
 }
 
-$('btn-download-keystore').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(pendingKeystore, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'ql-wallet-' + pendingKeystore.address.slice(0, 10) + '.json';
-  a.click();
-  URL.revokeObjectURL(url);
-  try { localStorage.setItem('ql_wallet_keystore', JSON.stringify(pendingKeystore)); } catch (e) {}
+$('btn-download-keystore').addEventListener('click', async () => {
+  try {
+    alert('Step 1: Button handler started.');
+    const keystoreJson = JSON.stringify(pendingKeystore, null, 2);
+    const filename = 'ql-wallet-' + pendingKeystore.address.slice(0, 10) + '.json';
+    alert('Step 2: Got keystore JSON and filename: ' + filename);
+
+    const tauriCheck = isTauriEnv();
+    alert('Step 3: isTauriEnv() returned: ' + tauriCheck);
+
+    if (tauriCheck) {
+      alert('Step 4: About to call native_save_file...');
+      const savedPath = await window._TAURI_INTERNALS_.invoke('native_save_file', { filename, content: keystoreJson });
+      alert('Step 5: Success! Saved to: ' + savedPath);
+    } else {
+      alert('Step 4 (web path): Using browser blob download.');
+      const blob = new Blob([keystoreJson], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  } catch (e) {
+    alert('CAUGHT AN ERROR: ' + (e && e.message ? e.message : String(e)));
+  }
+
+  try { localStorage.setItem('ql_wallet_keystore', keystoreJson); } catch (e) {}
 });
 
 $('confirm-saved').addEventListener('change', updateContinueButton);
@@ -1104,7 +1178,7 @@ $('btn-restore').addEventListener('click', async () => {
     const seedBytes = await mnemonicToEntropy(phrase, bip39Wordlist);
 
     await wasmReady;
-    const kp = keypair_from_seed(new Uint8Array(seedBytes));
+    const kp = await keypair_from_seed(new Uint8Array(seedBytes));
     const pub = new Uint8Array(kp.public_key);
     const sec = new Uint8Array(kp.secret_key);
 
@@ -1155,7 +1229,7 @@ $('btn-unlock').addEventListener('click', async () => {
     const pub = hexDecode(keystore.address);
 
     await wasmReady;
-    if (!isValidAddress(pub)) throw new Error('Keystore address is not a valid Dilithium3 public key.');
+    if (!await isValidAddress(pub)) throw new Error('Keystore address is not a valid Dilithium3 public key.');
 
     secretKeyBytes = sec;
     publicKeyBytes = pub;
@@ -1289,6 +1363,47 @@ $('btn-copy-address').addEventListener('click', () => {
   setTimeout(() => $('btn-copy-address').textContent = 'Copy', 1500);
 });
 
+// Real, complete transaction history — both sent AND received, straight
+// from the node itself, rather than only what this session personally
+// triggered. Fetched once on unlock (a full-chain scan on the node's
+// side, so not worth repeating on every 6-second poll).
+async function loadRealHistory() {
+  try {
+    const res = await fetch(apiBase() + '/api/transactions?address=' + currentAddress);
+    const data = await res.json();
+    const txs = (data.transactions || []).slice().sort((a, b) => b.block_height - a.block_height);
+
+    function row(tx) {
+      const el = document.createElement('div');
+      el.className = 'activity-item';
+      const sign = tx.direction === 'sent' ? '-' : '+';
+      const label = tx.direction === 'sent' ? 'Sent to ' : (tx.direction === 'mined' ? 'Mined block #' + tx.block_height : 'Received from ');
+      const color = tx.direction === 'sent' ? '' : 'color:var(--success);';
+      const who = tx.direction === 'mined' ? '' : tx.counterparty.slice(0, 14) + '…';
+      el.innerHTML = '<span class="label">' + label + who + '</span><span class="val" style="' + color + '">' + sign + tx.amount_ql + ' QL</span>';
+      return el;
+    }
+
+    const list = $('activity-list');
+    const preview = $('home-activity-preview');
+
+    if (txs.length === 0) {
+      list.innerHTML = '<div class="empty-note">No transactions yet.</div>';
+      preview.innerHTML = '<div class="empty-note">No transactions yet.</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    txs.forEach(tx => list.appendChild(row(tx)));
+
+    preview.innerHTML = '';
+    txs.slice(0, 2).forEach(tx => preview.appendChild(row(tx)));
+  } catch (e) {
+    // Leave whatever was already showing (e.g. session-only sends) if the
+    // real history genuinely can't be reached right now.
+  }
+}
+
 function doLock() {
   secretKeyBytes = null;
   publicKeyBytes = null;
@@ -1312,7 +1427,7 @@ $('btn-send').addEventListener('click', async () => {
 
     const receiverBytes = hexDecode(toHex);
     await wasmReady;
-    if (!isValidAddress(receiverBytes)) throw new Error('Recipient address is not a valid Dilithium3 public key.');
+    if (!await isValidAddress(receiverBytes)) throw new Error('Recipient address is not a valid Dilithium3 public key.');
 
     const amountQL = parseFloat(amountStr);
     if (isNaN(amountQL) || amountQL <= 0) throw new Error('Enter a valid amount greater than 0.');
@@ -1343,7 +1458,7 @@ $('btn-send').addEventListener('click', async () => {
 
     let signature;
     try {
-      signature = sign_message(secretKeyBytes, message);
+      signature = await sign_message(secretKeyBytes, message);
     } catch (e) {
       throw new Error(e.message || 'Could not sign this transaction.');
     }
@@ -1397,47 +1512,6 @@ function addActivity(amount, to) {
   preview.prepend(row());
   while (preview.children.length > 2) {
     preview.removeChild(preview.lastChild);
-  }
-}
-
-// Real, complete transaction history — both sent AND received, straight
-// from the node itself, rather than only what this session personally
-// triggered. Fetched once on unlock (a full-chain scan on the node's
-// side, so not worth repeating on every 6-second poll).
-async function loadRealHistory() {
-  try {
-    const res = await fetch(apiBase() + '/api/transactions?address=' + currentAddress);
-    const data = await res.json();
-    const txs = (data.transactions || []).slice().sort((a, b) => b.block_height - a.block_height);
-
-    function row(tx) {
-      const el = document.createElement('div');
-      el.className = 'activity-item';
-      const sign = tx.direction === 'sent' ? '-' : '+';
-      const label = tx.direction === 'sent' ? 'Sent to ' : (tx.direction === 'mined' ? 'Mined block #' + tx.block_height : 'Received from ');
-      const color = tx.direction === 'sent' ? '' : 'color:var(--success);';
-      const who = tx.direction === 'mined' ? '' : tx.counterparty.slice(0, 14) + '…';
-      el.innerHTML = '<span class="label">' + label + who + '</span><span class="val" style="' + color + '">' + sign + tx.amount_ql + ' QL</span>';
-      return el;
-    }
-
-    const list = $('activity-list');
-    const preview = $('home-activity-preview');
-
-    if (txs.length === 0) {
-      list.innerHTML = '<div class="empty-note">No transactions yet.</div>';
-      preview.innerHTML = '<div class="empty-note">No transactions yet.</div>';
-      return;
-    }
-
-    list.innerHTML = '';
-    txs.forEach(tx => list.appendChild(row(tx)));
-
-    preview.innerHTML = '';
-    txs.slice(0, 2).forEach(tx => preview.appendChild(row(tx)));
-  } catch (e) {
-    // Leave whatever was already showing (e.g. session-only sends) if the
-    // real history genuinely can't be reached right now.
   }
 }
 
@@ -1539,7 +1613,7 @@ $('btn-sig-test').addEventListener('click', async () => {
   try {
     await wasmReady;
     const testMessage = new TextEncoder().encode('Quantum-Lattice self-test: ' + new Date().toISOString());
-    const signature = sign_message(secretKeyBytes, testMessage);
+    const signature = await sign_message(secretKeyBytes, testMessage);
     const sigBytes = new Uint8Array(signature);
 
     result.innerHTML =
