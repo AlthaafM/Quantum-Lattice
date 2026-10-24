@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use crate::wallet::verify_signature;
+use crate::ledger::Transaction;
 
 // Quantum-Lattice (QL) Core Supply Parameters
 // Updated tokenomics: vaults reduced from 51.2% to ~20.4% of supply
@@ -73,6 +74,10 @@ pub struct ConsensusState {
 
 pub struct ConsensusEngine {
     pub state: ConsensusState,
+    /// Next expected transaction number for each account (Fork 3). Not part of the
+    /// saved state: it is rebuilt at startup from the blocks at or after
+    /// FORK3_ACTIVATION_HEIGHT, which keeps the stored state format unchanged.
+    pub nonces: HashMap<Vec<u8>, u64>,
 }
 
 #[derive(Debug)]
@@ -80,6 +85,10 @@ pub enum TxError {
     InvalidSignature,
     InsufficientBalance,
     ZeroAmount,
+    BadAddress,
+    BadNonce,
+    NonceTooLow,
+    NonceTooHigh,
 }
 
 impl ConsensusEngine {
@@ -107,13 +116,14 @@ impl ConsensusEngine {
                 chain_height: 0,
                 difficulty_bits: GENESIS_DIFFICULTY_BITS,
             },
+            nonces: HashMap::new(),
         }
     }
 
     /// Restores a chain that already exists — this is what makes restarts safe.
     pub fn from_state(state: ConsensusState) -> Self {
         println!("[CONSENSUS] Restored existing chain state at height {}", state.chain_height);
-        Self { state }
+        Self { state, nonces: HashMap::new() }
     }
 
     pub fn balance_of(&self, pk: &[u8]) -> u64 {
@@ -168,6 +178,79 @@ impl ConsensusEngine {
         *self.state.balances.get_mut(sender).unwrap() -= amount;
         *self.state.balances.entry(receiver.to_vec()).or_insert(0) += amount;
 
+        Ok(())
+    }
+
+    /// Next transaction number this account must use (Fork 3 and later).
+    pub fn next_nonce(&self, pk: &[u8]) -> u64 {
+        *self.nonces.get(pk).unwrap_or(&0)
+    }
+
+    /// Fork 3 transaction rules. The signed message also covers a chain ID and the
+    /// account's transaction number, so a copied transaction can never be applied twice
+    /// and cannot be replayed on another chain. Cheap checks run before the signature.
+    pub fn apply_transaction_v2(
+        &mut self,
+        sender: &[u8],
+        receiver: &[u8],
+        amount: u64,
+        signature: &[u8],
+        nonce: u64,
+    ) -> Result<(), TxError> {
+        if amount == 0 {
+            return Err(TxError::ZeroAmount);
+        }
+        if sender.len() != ADDRESS_LEN || receiver.len() != ADDRESS_LEN {
+            return Err(TxError::BadAddress);
+        }
+        let expected = self.next_nonce(sender);
+        if nonce < expected {
+            return Err(TxError::NonceTooLow);
+        }
+        if nonce > expected {
+            return Err(TxError::NonceTooHigh);
+        }
+        let message = tx_message_v2(sender, receiver, amount, nonce);
+        if !verify_signature(sender, &message, signature) {
+            return Err(TxError::InvalidSignature);
+        }
+        let sender_balance = *self.state.balances.get(sender).unwrap_or(&0);
+        if sender_balance < amount {
+            return Err(TxError::InsufficientBalance);
+        }
+        *self.state.balances.get_mut(sender).unwrap() -= amount;
+        *self.state.balances.entry(receiver.to_vec()).or_insert(0) += amount;
+        self.nonces.insert(sender.to_vec(), expected + 1);
+        Ok(())
+    }
+
+    /// Applies one transaction under the rules for the block height it belongs to.
+    /// From Fork 3 on, tx.timestamp carries the account's transaction number
+    /// (the field already exists in every stored block, so nothing needs migrating).
+    pub fn apply_tx(&mut self, block_height: u64, tx: &Transaction) -> Result<(), TxError> {
+        if fork3_active(block_height) {
+            let nonce = u64::try_from(tx.timestamp).map_err(|_| TxError::BadNonce)?;
+            self.apply_transaction_v2(&tx.sender, &tx.receiver, tx.amount, &tx.signature, nonce)
+        } else {
+            self.apply_transaction(&tx.sender, &tx.receiver, tx.amount, &tx.signature)
+        }
+    }
+
+    /// Applies every transaction of a block, all or nothing: if any one is invalid,
+    /// balances and transaction numbers are put back exactly as they were.
+    pub fn apply_block_txs(&mut self, block_height: u64, txs: &[Transaction]) -> Result<(), TxError> {
+        if txs.is_empty() {
+            return Ok(());
+        }
+        let state_backup = self.state.clone();
+        let nonces_backup = self.nonces.clone();
+        for tx in txs {
+            if let Err(e) = self.apply_tx(block_height, tx) {
+                self.state = state_backup;
+                self.nonces = nonces_backup;
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
@@ -264,6 +347,38 @@ mod emergency_tests {
 
 
 // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// FORK 3 (hard fork): transaction replay protection.
+//
+// From FORK3_ACTIVATION_HEIGHT on, a transaction signs
+//     "QLTX2" || chain_id (u32 LE) || sender || receiver || amount (u64 LE) || nonce (u64 LE)
+// where nonce is the sender's transaction counter (first transaction = 0, then 1, ...).
+// The nonce travels in the transaction's existing `timestamp` field. Before the
+// activation height the old message (sender || receiver || amount) stays valid.
+// ---------------------------------------------------------------------
+pub const FORK3_ACTIVATION_HEIGHT: u64 = 36_450;
+pub const QL_CHAIN_ID: u32 = 0x514C_0001;
+pub const TX_V2_TAG: &[u8] = b"QLTX2";
+/// Size of an ML-DSA-65 public key; every v2 sender and receiver must be exactly this long.
+pub const ADDRESS_LEN: usize = 1952;
+/// How many transactions ahead of its confirmed count an account may queue.
+pub const MAX_PENDING_NONCE_AHEAD: u64 = 256;
+
+pub fn fork3_active(block_height: u64) -> bool {
+    block_height >= FORK3_ACTIVATION_HEIGHT
+}
+
+pub fn tx_message_v2(sender: &[u8], receiver: &[u8], amount: u64, nonce: u64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(TX_V2_TAG.len() + 4 + sender.len() + receiver.len() + 16);
+    m.extend_from_slice(TX_V2_TAG);
+    m.extend_from_slice(&QL_CHAIN_ID.to_le_bytes());
+    m.extend_from_slice(sender);
+    m.extend_from_slice(receiver);
+    m.extend_from_slice(&amount.to_le_bytes());
+    m.extend_from_slice(&nonce.to_le_bytes());
+    m
+}
+
 // FORK 2 (hard fork, active from FORK2_ACTIVATION_HEIGHT): fine-grained,
 // per-block difficulty.
 //
@@ -538,5 +653,112 @@ mod fork2_tests {
         assert!(!fork2_timestamp_ok(1901, 1000, 1000));
         assert_eq!(median_of(vec![5, 1, 3]), 3);
         assert_eq!(median_of(vec![]), 0);
+    }
+}
+
+
+#[cfg(test)]
+mod fork3_tests {
+    use super::*;
+    use ml_dsa::{Keypair, MlDsa65, Seed, SigningKey};
+
+    fn keypair(b: u8) -> ([u8; 32], Vec<u8>) {
+        let seed = [b; 32];
+        let sk = SigningKey::<MlDsa65>::from_seed(&Seed::from(seed));
+        (seed, sk.verifying_key().encode().as_slice().to_vec())
+    }
+
+    fn signed_tx(seed: &[u8; 32], from: &[u8], to: &[u8], amount: u64, nonce: u64) -> Transaction {
+        let msg = tx_message_v2(from, to, amount, nonce);
+        let sig = crate::wallet::sign_with_seed_bytes(seed, &msg);
+        Transaction { sender: from.to_vec(), receiver: to.to_vec(), amount, signature: sig, timestamp: nonce as i64 }
+    }
+
+    fn engine_with(from: &[u8], coins: u64) -> ConsensusEngine {
+        let mut balances = HashMap::new();
+        balances.insert(from.to_vec(), coins * COIN);
+        ConsensusEngine {
+            state: ConsensusState { total_minted_supply: coins * COIN, balances, chain_height: FORK3_ACTIVATION_HEIGHT, difficulty_bits: 20 },
+            nonces: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_confirmed_transaction_cannot_be_replayed() {
+        let (seed_a, a) = keypair(1);
+        let (_, b) = keypair(2);
+        let mut eng = engine_with(&a, 100);
+        let h = FORK3_ACTIVATION_HEIGHT;
+        let tx = signed_tx(&seed_a, &a, &b, 10 * COIN, 0);
+        assert!(eng.apply_tx(h, &tx).is_ok());
+        // the very same bytes again: refused, balances untouched
+        assert!(matches!(eng.apply_tx(h, &tx), Err(TxError::NonceTooLow)));
+        assert_eq!(eng.balance_of(&a), 90 * COIN);
+        assert_eq!(eng.balance_of(&b), 10 * COIN);
+        // the next transaction number works
+        let tx2 = signed_tx(&seed_a, &a, &b, 10 * COIN, 1);
+        assert!(eng.apply_tx(h, &tx2).is_ok());
+        assert_eq!(eng.next_nonce(&a), 2);
+    }
+
+    #[test]
+    fn old_format_and_wrong_chain_are_rejected_after_the_fork() {
+        let (seed_a, a) = keypair(1);
+        let (_, b) = keypair(2);
+        let mut eng = engine_with(&a, 100);
+        let h = FORK3_ACTIVATION_HEIGHT;
+        // old-style message (no tag, chain ID or nonce)
+        let mut old = Vec::new();
+        old.extend_from_slice(&a);
+        old.extend_from_slice(&b);
+        old.extend_from_slice(&(5 * COIN).to_le_bytes());
+        let sig = crate::wallet::sign_with_seed_bytes(&seed_a, &old);
+        let tx = Transaction { sender: a.clone(), receiver: b.clone(), amount: 5 * COIN, signature: sig, timestamp: 0 };
+        assert!(matches!(eng.apply_tx(h, &tx), Err(TxError::InvalidSignature)));
+        // before the fork, the old style still works
+        assert!(eng.apply_tx(FORK3_ACTIVATION_HEIGHT - 1, &tx).is_ok());
+    }
+
+    #[test]
+    fn gaps_negative_nonces_and_bad_addresses_are_refused() {
+        let (seed_a, a) = keypair(1);
+        let (_, b) = keypair(2);
+        let mut eng = engine_with(&a, 100);
+        let h = FORK3_ACTIVATION_HEIGHT;
+        let ahead = signed_tx(&seed_a, &a, &b, COIN, 3);
+        assert!(matches!(eng.apply_tx(h, &ahead), Err(TxError::NonceTooHigh)));
+        let mut neg = signed_tx(&seed_a, &a, &b, COIN, 0);
+        neg.timestamp = -1;
+        assert!(matches!(eng.apply_tx(h, &neg), Err(TxError::BadNonce)));
+        let short = Transaction { sender: a.clone(), receiver: vec![1, 2, 3], amount: COIN, signature: vec![], timestamp: 0 };
+        assert!(matches!(eng.apply_tx(h, &short), Err(TxError::BadAddress)));
+    }
+
+    #[test]
+    fn a_bad_transaction_rolls_back_the_whole_block() {
+        let (seed_a, a) = keypair(1);
+        let (_, b) = keypair(2);
+        let mut eng = engine_with(&a, 100);
+        let h = FORK3_ACTIVATION_HEIGHT;
+        let good = signed_tx(&seed_a, &a, &b, 10 * COIN, 0);
+        let mut bad = signed_tx(&seed_a, &a, &b, 10 * COIN, 1);
+        bad.amount = 11 * COIN; // signature no longer matches
+        let before_a = eng.balance_of(&a);
+        assert!(eng.apply_block_txs(h, &[good, bad]).is_err());
+        assert_eq!(eng.balance_of(&a), before_a);
+        assert_eq!(eng.balance_of(&b), 0);
+        assert_eq!(eng.next_nonce(&a), 0);
+    }
+
+    #[test]
+    fn message_layout_is_fixed() {
+        // Wallets in JavaScript and Rust must build exactly these bytes.
+        let m = tx_message_v2(&[0xAA; 2], &[0xBB; 3], 0x0102030405060708, 9);
+        let mut want = b"QLTX2".to_vec();
+        want.extend_from_slice(&[0x01, 0x00, 0x4C, 0x51]); // chain id 0x514C0001, little-endian
+        want.extend_from_slice(&[0xAA, 0xAA, 0xBB, 0xBB, 0xBB]);
+        want.extend_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
+        want.extend_from_slice(&[9, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(m, want);
     }
 }
