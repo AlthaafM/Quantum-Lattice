@@ -844,6 +844,51 @@ fn submit_win_and_pay_out(node_address: &str, state: &Arc<SharedState>, pool_see
 /// after a genuine real-network win, and by the test-only trigger
 /// endpoint (which skips the block-submission step entirely, since
 /// there's no real winning nonce to submit in that case).
+/// What the node says about transaction format. From the Fork 3 height on, a
+/// payment must be signed over (chain ID, sender, receiver, amount, nonce).
+/// Returns (fork3_active_for_next_block, nonce_to_use_for_the_first_payment).
+fn tx_context(balance_body: &str) -> (bool, u64) {
+    let nonce = extract_json_number(balance_body, "nonce").unwrap_or(0);
+    let height = extract_json_number(balance_body, "chain_height").unwrap_or(0);
+    let active = match extract_json_number(balance_body, "fork3_height") {
+        Some(f) => height + 1 >= f,
+        None => false, // older node: original format
+    };
+    (active, nonce)
+}
+
+/// Builds the JSON body for /api/submit_tx in whichever format is in force.
+fn build_tx_body(
+    pool_seed: &[u8; 32], pool_pk: &[u8], pool_pk_hex: &str,
+    receiver: &[u8], receiver_hex: &str, amount: u64,
+    fork3: bool, nonce: u64,
+) -> String {
+    if fork3 {
+        let mut message = Vec::with_capacity(5 + 4 + pool_pk.len() + receiver.len() + 16);
+        message.extend_from_slice(b"QLTX2");
+        message.extend_from_slice(&0x514C_0001u32.to_le_bytes());
+        message.extend_from_slice(pool_pk);
+        message.extend_from_slice(receiver);
+        message.extend_from_slice(&amount.to_le_bytes());
+        message.extend_from_slice(&nonce.to_le_bytes());
+        let signature = sign_with_seed(pool_seed, &message);
+        format!(
+            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{},\"nonce\":{},\"signature\":\"{}\"}}",
+            pool_pk_hex, receiver_hex, amount, nonce, hex::encode(&signature)
+        )
+    } else {
+        let mut message = Vec::with_capacity(pool_pk.len() + receiver.len() + 8);
+        message.extend_from_slice(pool_pk);
+        message.extend_from_slice(receiver);
+        message.extend_from_slice(&amount.to_le_bytes());
+        let signature = sign_with_seed(pool_seed, &message);
+        format!(
+            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{},\"signature\":\"{}\"}}",
+            pool_pk_hex, receiver_hex, amount, hex::encode(&signature)
+        )
+    }
+}
+
 fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8; 32], pool_pk: Vec<u8>, pool_pk_hex: String, is_manual: bool) {
     // Snapshot and reset the round's shares atomically, so new shares
     // arriving during payout processing count toward the NEXT round, not
@@ -894,6 +939,7 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
 
     const COIN: f64 = 100_000_000.0; // matches the node's smallest-unit scale
     let contributor_count = round_shares.len();
+    let (fork3, mut next_nonce) = tx_context(balance_body);
 
     for (contributor_hex, share_count) in round_shares {
         let proportion = share_count as f64 / total_shares as f64;
@@ -908,18 +954,10 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
             Err(_) => { println!("[POOL] Skipping payout to invalid address: {}", contributor_hex); continue; }
         };
 
-        let mut message = Vec::with_capacity(pool_pk.len() + receiver.len() + 8);
-        message.extend_from_slice(&pool_pk);
-        message.extend_from_slice(&receiver);
-        message.extend_from_slice(&payout_smallest.to_le_bytes());
-        let signature = sign_with_seed(&pool_seed, &message);
-
-        let tx_body = format!(
-            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{},\"signature\":\"{}\"}}",
-            pool_pk_hex, contributor_hex, payout_smallest, hex::encode(&signature)
-        );
+        let tx_body = build_tx_body(&pool_seed, &pool_pk, &pool_pk_hex, &receiver, &contributor_hex, payout_smallest, fork3, next_nonce);
         match http_post(node_address, "/api/submit_tx", &tx_body) {
             Some(r) if r.starts_with("HTTP/1.1 200") => {
+                next_nonce += 1;
                 println!("[POOL] Paid {:.4} QL to {} ({} shares, {:.1}%)", payout_ql, contributor_hex, share_count, proportion * 100.0);
             }
             _ => {
@@ -998,24 +1036,18 @@ fn repay_from_file(node_address: &str, pool_seed: [u8; 32], pool_pk: &[u8], pool
     }
     println!("[POOL] REPAY — distributing {:.4} QL across {} address(es).", available_ql, rows.len());
     const COIN: f64 = 100_000_000.0;
+    let (fork3, mut next_nonce) = tx_context(balance_body);
     let mut sent = 0;
     for (addr, shares) in rows.iter() {
         let payout_ql = available_ql * (*shares as f64 / total as f64);
         let payout_smallest = (payout_ql * COIN).round() as u64;
         if payout_smallest == 0 { continue; }
         let receiver = hex::decode(addr).unwrap();
-        let mut message = Vec::with_capacity(pool_pk.len() + receiver.len() + 8);
-        message.extend_from_slice(pool_pk);
-        message.extend_from_slice(&receiver);
-        message.extend_from_slice(&payout_smallest.to_le_bytes());
-        let signature = sign_with_seed(&pool_seed, &message);
-        let tx_body = format!(
-            "{{\"sender\":\"{}\",\"receiver\":\"{}\",\"amount\":{},\"signature\":\"{}\"}}",
-            pool_pk_hex, addr, payout_smallest, hex::encode(&signature)
-        );
+        let tx_body = build_tx_body(&pool_seed, pool_pk, pool_pk_hex, &receiver, addr, payout_smallest, fork3, next_nonce);
         match http_post(node_address, "/api/submit_tx", &tx_body) {
             Some(r) if r.starts_with("HTTP/1.1 200") => {
                 sent += 1;
+                next_nonce += 1;
                 println!("[POOL] REPAY — queued {:.4} QL to {}", payout_ql, addr);
             }
             _ => println!("[POOL] REPAY — FAILED to queue {:.4} QL to {}", payout_ql, addr),
@@ -1698,5 +1730,22 @@ fn main() {
                 handle_miner_connection(stream, state, node_address, pool_seed_clone, pool_pk_clone, pool_pk_hex_clone);
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod fork3_format_tests {
+    use super::*;
+
+    #[test]
+    fn context_switches_at_the_fork_height() {
+        let before = "{\"balance_ql\":1.0,\"nonce\":3,\"chain_height\":100,\"fork3_height\":200}";
+        assert_eq!(tx_context(before), (false, 3));
+        let at = "{\"balance_ql\":1.0,\"nonce\":0,\"chain_height\":199,\"fork3_height\":200}";
+        assert_eq!(tx_context(at), (true, 0)); // the next block is the fork block
+        let after = "{\"balance_ql\":1.0,\"nonce\":7,\"chain_height\":500,\"fork3_height\":200}";
+        assert_eq!(tx_context(after), (true, 7));
+        let old_node = "{\"balance_ql\":1.0}";
+        assert_eq!(tx_context(old_node), (false, 0));
     }
 }
