@@ -132,6 +132,9 @@ async fn main() {
         }
     };
 
+    let mut engine = engine;
+    network::rebuild_nonces(&db, &mut engine);
+
     println!(
         "[CONSENSUS] Height: {} | Supply: {} QL",
         engine.state.chain_height,
