@@ -844,6 +844,17 @@ fn submit_win_and_pay_out(node_address: &str, state: &Arc<SharedState>, pool_see
 /// after a genuine real-network win, and by the test-only trigger
 /// endpoint (which skips the block-submission step entirely, since
 /// there's no real winning nonce to submit in that case).
+/// Whole-unit payout for one contributor: rounds DOWN, so the payouts of a
+/// round can never add up to more than the pool actually holds (rounding each
+/// one to the nearest unit could overshoot by a unit and make the last payment
+/// fail on the node). Any leftover dust of a few units stays in the pool.
+fn payout_units(available_units: u64, shares: u64, total_shares: u64) -> u64 {
+    if total_shares == 0 {
+        return 0;
+    }
+    ((available_units as u128 * shares as u128) / total_shares as u128) as u64
+}
+
 /// What the node says about transaction format. From the Fork 3 height on, a
 /// payment must be signed over (chain ID, sender, receiver, amount, nonce).
 /// Returns (fork3_active_for_next_block, nonce_to_use_for_the_first_payment).
@@ -943,8 +954,8 @@ fn process_payouts(node_address: &str, state: &Arc<SharedState>, pool_seed: [u8;
 
     for (contributor_hex, share_count) in round_shares {
         let proportion = share_count as f64 / total_shares as f64;
-        let payout_ql = available_ql * proportion;
-        let payout_smallest = (payout_ql * COIN).round() as u64;
+        let payout_smallest = payout_units((available_ql * COIN).round() as u64, share_count, total_shares);
+        let payout_ql = payout_smallest as f64 / COIN;
         if payout_smallest == 0 {
             continue;
         }
@@ -1039,8 +1050,8 @@ fn repay_from_file(node_address: &str, pool_seed: [u8; 32], pool_pk: &[u8], pool
     let (fork3, mut next_nonce) = tx_context(balance_body);
     let mut sent = 0;
     for (addr, shares) in rows.iter() {
-        let payout_ql = available_ql * (*shares as f64 / total as f64);
-        let payout_smallest = (payout_ql * COIN).round() as u64;
+        let payout_smallest = payout_units((available_ql * COIN).round() as u64, *shares, total);
+        let payout_ql = payout_smallest as f64 / COIN;
         if payout_smallest == 0 { continue; }
         let receiver = hex::decode(addr).unwrap();
         let tx_body = build_tx_body(&pool_seed, pool_pk, pool_pk_hex, &receiver, addr, payout_smallest, fork3, next_nonce);
@@ -1747,5 +1758,29 @@ mod fork3_format_tests {
         assert_eq!(tx_context(after), (true, 7));
         let old_node = "{\"balance_ql\":1.0}";
         assert_eq!(tx_context(old_node), (false, 0));
+    }
+}
+
+#[cfg(test)]
+mod payout_rounding_tests {
+    use super::*;
+
+    #[test]
+    fn payouts_never_exceed_the_balance() {
+        // the real case that dropped a payout: 20 QL over these four share counts
+        let shares = [29294u64, 4327, 23892, 17258];
+        let total: u64 = shares.iter().sum();
+        let sum: u64 = shares.iter().map(|s| payout_units(2_000_000_000, *s, total)).sum();
+        assert!(sum <= 2_000_000_000);
+        assert!(2_000_000_000 - sum < shares.len() as u64);
+        // a spread of balances and splits
+        for bal in [1u64, 999, 4_800_000_000, 2_000_000_001, 1_234_567_891] {
+            for split in [vec![1u64, 1, 1], vec![3, 7, 11, 13], vec![1, 100_000]] {
+                let t: u64 = split.iter().sum();
+                let s: u64 = split.iter().map(|x| payout_units(bal, *x, t)).sum();
+                assert!(s <= bal);
+            }
+        }
+        assert_eq!(payout_units(10, 0, 0), 0);
     }
 }
