@@ -430,6 +430,9 @@ pub fn parent_fine(state_bits: u32, block_height: u64) -> u32 {
 /// a long gap since its parent. Only valid when fork2_active(block_height).
 pub fn required_fine(state_bits: u32, block_height: u64, gap_secs: i64) -> u32 {
     let base = parent_fine(state_bits, block_height);
+    if block_height >= EASING2_ACTIVATION_HEIGHT {
+        return eased_fine(base, gap_secs);
+    }
     if gap_secs <= EMERGENCY_GRACE_SECS {
         return base;
     }
@@ -437,6 +440,34 @@ pub fn required_fine(state_bits: u32, block_height: u64, gap_secs: i64) -> u32 {
     let drop = steps.min(EMERGENCY_MAX_DROP_BITS as u64) as u32;
     let floor = FORK2_MIN_FP.min(base);
     base.saturating_sub(drop.saturating_mul(FP_ONE)).max(floor)
+}
+
+// ---------------------------------------------------------------------
+// EASING 2 (consensus change, active from EASING2_ACTIVATION_HEIGHT):
+// faster, smooth stall easing. Mining hashrate here comes and goes in bursts,
+// and the old rule only started easing after 60 minutes, so gaps of 30-45+
+// minutes happened about once a day. From this height, once the parent block
+// is more than EASING2_GRACE_SECS old, the required difficulty falls
+// continuously by 1 bit for every EASING2_SECS_PER_BIT seconds beyond that,
+// down to the same floor and 20-bit cap as before. As with the old rule, the
+// eased value applies only to that one block and is NOT written into the
+// stored baseline. Integer math only. Below the activation height the old
+// rule is used unchanged, so existing blocks still validate.
+// ---------------------------------------------------------------------
+pub const EASING2_ACTIVATION_HEIGHT: u64 = 37_000;
+pub const EASING2_GRACE_SECS: i64 = 600;
+pub const EASING2_SECS_PER_BIT: i64 = 180;
+
+pub fn eased_fine(base: u32, gap_secs: i64) -> u32 {
+    if gap_secs <= EASING2_GRACE_SECS {
+        return base;
+    }
+    let over = (gap_secs - EASING2_GRACE_SECS) as i128;
+    let drop_fp = over * FP_ONE as i128 / EASING2_SECS_PER_BIT as i128;
+    let max_drop_fp = EMERGENCY_MAX_DROP_BITS as i128 * FP_ONE as i128;
+    let drop = drop_fp.min(max_drop_fp) as u32;
+    let floor = FORK2_MIN_FP.min(base);
+    base.saturating_sub(drop).max(floor)
 }
 
 /// Stored baseline after a block: parent's baseline (NOT the eased value)
@@ -760,5 +791,70 @@ mod fork3_tests {
         want.extend_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
         want.extend_from_slice(&[9, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(m, want);
+    }
+}
+
+#[cfg(test)]
+mod easing2_tests {
+    use super::*;
+    const H_OLD: u64 = EASING2_ACTIVATION_HEIGHT - 1;
+    const H_NEW: u64 = EASING2_ACTIVATION_HEIGHT;
+
+    #[test]
+    fn old_rule_unchanged_below_activation() {
+        let base = 37 << FP_SHIFT;
+        assert_eq!(required_fine(base, H_OLD, 1200), base);
+        assert_eq!(required_fine(base, H_OLD, 3600), base);
+        assert_eq!(required_fine(base, H_OLD, 3601), base - FP_ONE);
+        assert_eq!(required_fine(base, H_OLD, 4201), base - 2 * FP_ONE);
+    }
+
+    #[test]
+    fn no_easing_within_grace() {
+        let base = 37 << FP_SHIFT;
+        assert_eq!(required_fine(base, H_NEW, 0), base);
+        assert_eq!(required_fine(base, H_NEW, 600), base);
+    }
+
+    #[test]
+    fn eases_one_bit_per_180s_after_grace() {
+        let base = 37 << FP_SHIFT;
+        assert_eq!(required_fine(base, H_NEW, 780), base - FP_ONE);
+        assert_eq!(required_fine(base, H_NEW, 960), base - 2 * FP_ONE);
+        assert_eq!(required_fine(base, H_NEW, 690), base - FP_ONE / 2);
+        // 30 minutes: (1800-600)/180 = 6.667 bits
+        assert_eq!(required_fine(base, H_NEW, 1800), base - (1200 * FP_ONE) / 180);
+    }
+
+    #[test]
+    fn never_harder_and_monotonic() {
+        let base = 40 << FP_SHIFT;
+        let mut prev = base;
+        for gap in 0..10_000i64 {
+            let r = required_fine(base, H_NEW, gap);
+            assert!(r <= base);
+            assert!(r <= prev);
+            prev = r;
+        }
+    }
+
+    #[test]
+    fn capped_and_floored() {
+        let base = 50 << FP_SHIFT;
+        assert_eq!(required_fine(base, H_NEW, 1_000_000), base - 20 * FP_ONE);
+        // 37 bits minus the 20-bit cap would be 17, so the 20-bit floor wins.
+        assert_eq!(required_fine(37 << FP_SHIFT, H_NEW, 1_000_000), FORK2_MIN_FP);
+        let low = 25 << FP_SHIFT;
+        assert_eq!(required_fine(low, H_NEW, 1_000_000), FORK2_MIN_FP);
+        let at_floor = FORK2_MIN_FP;
+        assert_eq!(required_fine(at_floor, H_NEW, 1_000_000), FORK2_MIN_FP);
+    }
+
+    #[test]
+    fn baseline_update_unaffected() {
+        // next_fine still depends only on the parent baseline and the real gap.
+        let base = 37 << FP_SHIFT;
+        assert_eq!(next_fine(base, 300), base);
+        assert!(next_fine(base, 1800) < base);
     }
 }
