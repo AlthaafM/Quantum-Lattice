@@ -44,6 +44,27 @@ from the chain at that block. Miners need no update: the mining template still
 sends difficulty_bits (rounded up). Updated miners and the pool also read
 difficulty_fp for exact mining.
 
+## Consensus upgrade: Easing 2 (activates at block 37,000)
+
+Mining hashrate on QL arrives in bursts, and the old rule only began easing
+difficulty after a full hour without a block. Easing 2 starts earlier and is
+smooth.
+
+- If the previous block is more than 10 minutes old, the difficulty the next
+  block must meet falls by 1 bit for every 3 minutes beyond that (fixed-point,
+  so it moves continuously), down to the same floor and 20-bit cap as before.
+- The eased value applies only to that one block. It is not written into the
+  stored baseline, and the normal per-block controller is unchanged.
+- Average block time stays at about 5 minutes. Only the long tail of stalls
+  is shortened.
+- Below block 37,000 the old rule is used unchanged.
+- Integer math only, so every platform agrees.
+
+Upgrading: every node must run this build before block 37,000, or it will
+split from the chain at that block. Wallets, miners and the pool need no
+update: the mining template already carries the eased difficulty
+(difficulty_bits, difficulty_fp).
+
 ## Building
 
 Requires a standard Rust toolchain (rustup.rs).
